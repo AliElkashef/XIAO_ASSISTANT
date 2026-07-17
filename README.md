@@ -8,7 +8,7 @@ A simple Arduino project for the **Seeed Studio XIAO ESP32S3 Sense** that uses t
 
 | Touch Button | GPIO | Action |
 |---|---|---|
-| Button 1 | GPIO 1 (D0) | Record 10 s audio → `audio_NNN.wav` |
+| Button 1 | GPIO 1 (D0) | Start/Stop audio recording → `audio_NNN.wav` |
 | Button 2 | GPIO 2 (D1) | Capture photo → `image_NNN.jpg` |
 
 - Sequential filenames — never overwrites existing files
@@ -97,14 +97,15 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 | Function | Description |
 |---|---|
 | `setup()` | Initialises Serial, SD card, camera, and microphone. Prints status summary. |
-| `loop()` | Polls both touch buttons. Dispatches `recordAudio()` or `captureImage()`. |
+| `loop()` | Streams audio while recording; polls touch buttons when idle. |
 | `initSDCard()` | Mounts the SD card via SPI. Returns `true` on success. |
 | `initCamera()` | Configures and starts the OV2640 camera. Returns `true` on success. |
 | `initMicrophone()` | Installs the I2S driver in PDM-RX mode. Returns `true` on success. |
 | `isTouched(pin)` | Reads capacitive touch value, applies debounce, waits for release. |
-| `recordAudio()` | Orchestrates a 10-second recording: generates filename → calls `saveWav()`. |
+| `startRecording()` | Opens a new WAV file, writes placeholder header, sets recording flag. |
+| `recordAudioChunk()` | Reads one I2S buffer and writes it to the open WAV file (called from loop). |
+| `stopRecording()` | Patches WAV header with actual size, closes file, prints duration. |
 | `captureImage()` | Orchestrates a photo capture: generates filename → calls `saveJpeg()`. |
-| `saveWav(path)` | Opens file, writes WAV header, streams I2S data for 10 s, patches header. |
 | `writeWavHeader(file, dataSize)` | Writes a standard 44-byte RIFF/WAV header for 16-bit mono PCM. |
 | `saveJpeg(path)` | Grabs camera frame buffer, writes JPEG bytes to file, releases buffer. |
 | `generateNextFilename(prefix, ext, index)` | Creates sequential filenames, skipping any that already exist on SD. |
@@ -120,8 +121,8 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 | Channels | 1 (Mono) |
 | Format | PCM (uncompressed) |
 | Container | WAV (RIFF) |
-| Duration | 10 seconds |
-| File Size | ~320 KB per recording |
+| Duration | Variable (touch to start, touch again to stop) |
+| File Size | ~32 KB per second of recording |
 
 ---
 

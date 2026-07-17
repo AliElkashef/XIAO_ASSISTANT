@@ -8,8 +8,8 @@
  *
  *  Features
  *  --------
- *  • Touch Button 1 (GPIO 1 / D0)  → Record 10 s of audio  → WAV on SD
- *  • Touch Button 2 (GPIO 2 / D1)  → Capture a JPEG photo  → JPG on SD
+ *  • Touch Button 1 (GPIO 1 / D0)  → Start/Stop audio recording → WAV on SD
+ *  • Touch Button 2 (GPIO 2 / D1)  → Capture a JPEG photo       → JPG on SD
  *
  *  Libraries used (all built-in with the ESP32-S3 board package)
  *  ---------------------------------------------------------------
@@ -75,9 +75,9 @@
 #define SAMPLE_RATE           16000     // 16 kHz
 #define BITS_PER_SAMPLE       16
 #define CHANNELS              1         // Mono
-#define RECORD_DURATION_SEC   10        // Seconds to record
 #define I2S_DMA_BUF_COUNT     8
 #define I2S_DMA_BUF_LEN       512
+#define I2S_READ_BUF_SIZE     1024      // Bytes per I2S read chunk
 
 // ─── Touch Sensor Parameters ─────────────────────────────────────────────────
 
@@ -88,23 +88,28 @@
 
 // ─── Global State ────────────────────────────────────────────────────────────
 
-static int audioFileIndex  = 0;   // Next index for audio_NNN.wav
-static int imageFileIndex  = 0;   // Next index for image_NNN.jpg
+static int audioFileIndex  = 0;      // Next index for audio_NNN.wav
+static int imageFileIndex  = 0;      // Next index for image_NNN.jpg
 static bool sdReady        = false;
 static bool cameraReady    = false;
 static bool micReady       = false;
-static bool actionInProgress = false; // Blocks new touches while busy
+static bool isRecording    = false;  // True while audio recording is active
+
+// Recording state (used while isRecording == true)
+static File    recordFile;           // Open WAV file handle
+static uint32_t totalBytesWritten = 0;
 
 // ─── Forward Declarations ────────────────────────────────────────────────────
 
 bool   initSDCard();
 bool   initCamera();
 bool   initMicrophone();
-void   recordAudio();
+void   startRecording();
+void   stopRecording();
+void   recordAudioChunk();
 void   captureImage();
 String generateNextFilename(const char* prefix, const char* extension, int &index);
 void   writeWavHeader(File &file, uint32_t dataSize);
-void   saveWav(const char* path);
 void   saveJpeg(const char* path);
 bool   isTouched(int pin);
 
@@ -131,7 +136,7 @@ void setup() {
   Serial.printf("  Camera    : %s\n", cameraReady ? "OK" : "FAIL");
   Serial.printf("  Microphone: %s\n", micReady    ? "OK" : "FAIL");
   Serial.println("----------------------");
-  Serial.println("Touch GPIO1 → Record 10 s audio");
+  Serial.println("Touch GPIO1 → Start / Stop audio recording");
   Serial.println("Touch GPIO2 → Capture a photo");
   Serial.println();
 }
@@ -141,18 +146,27 @@ void setup() {
 // =============================================================================
 
 void loop() {
-  // Skip touch checks while an action is running
-  if (actionInProgress) return;
+  // ── While recording: stream audio data and check for stop touch ──
+  if (isRecording) {
+    // Keep writing audio chunks to the SD card
+    recordAudioChunk();
 
-  // ── Touch Button 1 — Audio Recording ──
+    // Check if user wants to stop
+    if (isTouched(TOUCH_BUTTON_RECORD)) {
+      stopRecording();
+    }
+    return;  // Don't process other buttons while recording
+  }
+
+  // ── Touch Button 1 — Start Audio Recording ──
   if (isTouched(TOUCH_BUTTON_RECORD)) {
-    Serial.println("[Touch] Button 1 detected — Audio");
+    Serial.println("[Touch] Button 1 detected — Start Recording");
     if (!sdReady) {
       Serial.println("[Error] SD card not available — cannot record.");
     } else if (!micReady) {
       Serial.println("[Error] Microphone not available — cannot record.");
     } else {
-      recordAudio();
+      startRecording();
     }
   }
 
@@ -321,23 +335,66 @@ bool initMicrophone() {
 }
 
 // =============================================================================
-//  AUDIO RECORDING
+//  AUDIO RECORDING  (Start / Stop toggle)
 // =============================================================================
 
 /**
- * Records RECORD_DURATION_SEC seconds of 16-bit mono PCM audio from the PDM
- * microphone and saves it as a WAV file on the SD card.
+ * Opens a new WAV file, writes a placeholder header, and sets the recording
+ * flag. From this point, loop() calls recordAudioChunk() every iteration.
  */
-void recordAudio() {
-  actionInProgress = true;
-
-  // Generate a unique filename
+void startRecording() {
   String filename = generateNextFilename("/audio_", ".wav", audioFileIndex);
-  Serial.printf("Recording %d seconds → %s\n", RECORD_DURATION_SEC, filename.c_str());
+  Serial.printf("Recording started → %s\n", filename.c_str());
+  Serial.println("Touch Button 1 again to stop.");
 
-  saveWav(filename.c_str());
+  recordFile = SD.open(filename.c_str(), FILE_WRITE);
+  if (!recordFile) {
+    Serial.println("[Error] Could not create WAV file.");
+    return;
+  }
 
-  actionInProgress = false;
+  // Write a placeholder WAV header (44 bytes) — patched on stop
+  writeWavHeader(recordFile, 0);
+
+  totalBytesWritten = 0;
+  isRecording = true;
+}
+
+/**
+ * Reads one chunk of audio data from the I2S microphone and writes it
+ * to the open WAV file. Called repeatedly from loop() while recording.
+ */
+void recordAudioChunk() {
+  uint8_t buffer[I2S_READ_BUF_SIZE];
+  size_t bytesRead = 0;
+
+  esp_err_t result = i2s_read(MIC_I2S_PORT, buffer, I2S_READ_BUF_SIZE,
+                              &bytesRead, portMAX_DELAY);
+  if (result == ESP_OK && bytesRead > 0) {
+    recordFile.write(buffer, bytesRead);
+    totalBytesWritten += bytesRead;
+  }
+}
+
+/**
+ * Stops recording: patches the WAV header with the actual data size,
+ * closes the file, and prints a summary.
+ */
+void stopRecording() {
+  isRecording = false;
+
+  // Patch the WAV header with the real data size
+  recordFile.seek(0);
+  writeWavHeader(recordFile, totalBytesWritten);
+  recordFile.close();
+
+  // Calculate duration for the user
+  float durationSec = (float)totalBytesWritten
+                      / (SAMPLE_RATE * CHANNELS * (BITS_PER_SAMPLE / 8));
+
+  Serial.println("Recording stopped.");
+  Serial.printf("Duration: %.1f seconds  |  Size: %u bytes\n\n",
+                durationSec, totalBytesWritten + 44);
 }
 
 // =============================================================================
@@ -348,65 +405,10 @@ void recordAudio() {
  * Captures a single JPEG frame from the camera and saves it to the SD card.
  */
 void captureImage() {
-  actionInProgress = true;
-
   String filename = generateNextFilename("/image_", ".jpg", imageFileIndex);
   Serial.printf("Capturing image → %s\n", filename.c_str());
 
   saveJpeg(filename.c_str());
-
-  actionInProgress = false;
-}
-
-// =============================================================================
-//  SAVE WAV FILE
-// =============================================================================
-
-/**
- * Opens a file, writes the WAV header, streams audio data from I2S, then
- * patches the header with the final data size.
- */
-void saveWav(const char* path) {
-  File file = SD.open(path, FILE_WRITE);
-  if (!file) {
-    Serial.println("[Error] Could not create WAV file.");
-    return;
-  }
-
-  // Calculate expected data size
-  uint32_t totalSamples  = SAMPLE_RATE * RECORD_DURATION_SEC;
-  uint32_t bytesPerSample = BITS_PER_SAMPLE / 8;
-  uint32_t expectedDataSize = totalSamples * bytesPerSample * CHANNELS;
-
-  // Write a placeholder WAV header (44 bytes) — we'll patch it later
-  writeWavHeader(file, expectedDataSize);
-
-  Serial.println("Recording...");
-
-  // Read audio data in chunks
-  const int bufferSize = 1024;       // Bytes per read
-  uint8_t buffer[bufferSize];
-  size_t bytesRead     = 0;
-  uint32_t totalBytesWritten = 0;
-
-  unsigned long startTime = millis();
-  unsigned long recordMs  = (unsigned long)RECORD_DURATION_SEC * 1000UL;
-
-  while ((millis() - startTime) < recordMs) {
-    esp_err_t result = i2s_read(MIC_I2S_PORT, buffer, bufferSize, &bytesRead, portMAX_DELAY);
-    if (result == ESP_OK && bytesRead > 0) {
-      file.write(buffer, bytesRead);
-      totalBytesWritten += bytesRead;
-    }
-  }
-
-  // Patch the WAV header with the actual recorded size
-  file.seek(0);
-  writeWavHeader(file, totalBytesWritten);
-  file.close();
-
-  Serial.println("Recording finished.");
-  Serial.printf("Saved: %s (%u bytes)\n\n", path, totalBytesWritten + 44);
 }
 
 // =============================================================================

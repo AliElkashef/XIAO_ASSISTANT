@@ -10,6 +10,7 @@
  *  --------
  *  • Touch Button 1 (GPIO 1 / D0)  → Start/Stop audio recording → WAV on SD
  *  • Touch Button 2 (GPIO 2 / D1)  → Capture a JPEG photo       → JPG on SD
+ *  • Vibration motor (GPIO 3 / D2)  → Haptic feedback on touch actions
  *
  *  Libraries used (all built-in with the ESP32-S3 board package)
  *  ---------------------------------------------------------------
@@ -43,6 +44,12 @@
 // Touch buttons (ESP32-S3 capacitive touch)
 #define TOUCH_BUTTON_RECORD   1   // GPIO 1  (D0) — record audio
 #define TOUCH_BUTTON_PHOTO    2   // GPIO 2  (D1) — capture photo
+
+// Vibration motor (connected via transistor/MOSFET to this pin)
+#define VIBRATION_MOTOR_PIN   3   // GPIO 3  (D2) — vibration motor
+#define VIBRATION_PWM_CHANNEL 2   // LEDC channel (0 & 1 used by camera)
+#define VIBRATION_PWM_FREQ    1000 // 1 kHz PWM frequency
+#define VIBRATION_PWM_RES     8   // 8-bit resolution (0–255)
 
 // SD card (SPI mode on Sense expansion board)
 #define SD_CS_PIN             21  // Chip-select for onboard SD slot
@@ -79,6 +86,12 @@
 #define I2S_DMA_BUF_LEN       512
 #define I2S_READ_BUF_SIZE     1024      // Bytes per I2S read chunk
 
+// ─── Vibration Motor Parameters ──────────────────────────────────────────────
+
+// Vibration intensity: 0 (off) to 255 (max). Change this to adjust strength.
+// Suggested values:  64 = light,  128 = medium,  200 = strong,  255 = max
+static uint8_t vibrationIntensity = 128;   // ← DEFAULT: medium
+
 // ─── Touch Sensor Parameters ─────────────────────────────────────────────────
 
 // On ESP32-S3, touchRead() values INCREASE when touched.
@@ -104,6 +117,7 @@ static uint32_t totalBytesWritten = 0;
 bool   initSDCard();
 bool   initCamera();
 bool   initMicrophone();
+void   initVibrationMotor();
 void   startRecording();
 void   stopRecording();
 void   recordAudioChunk();
@@ -112,6 +126,8 @@ String generateNextFilename(const char* prefix, const char* extension, int &inde
 void   writeWavHeader(File &file, uint32_t dataSize);
 void   saveJpeg(const char* path);
 bool   isTouched(int pin);
+void   vibrateOnce(unsigned long durationMs);
+void   vibratePattern(int pulses, unsigned long onMs, unsigned long offMs);
 
 // =============================================================================
 //  SETUP
@@ -129,12 +145,14 @@ void setup() {
   sdReady     = initSDCard();
   cameraReady = initCamera();
   micReady    = initMicrophone();
+  initVibrationMotor();
 
   Serial.println();
   Serial.println("--- Status Summary ---");
   Serial.printf("  SD Card   : %s\n", sdReady     ? "OK" : "FAIL");
   Serial.printf("  Camera    : %s\n", cameraReady ? "OK" : "FAIL");
   Serial.printf("  Microphone: %s\n", micReady    ? "OK" : "FAIL");
+  Serial.printf("  Vibration : intensity %d/255\n", vibrationIntensity);
   Serial.println("----------------------");
   Serial.println("Touch GPIO1 → Start / Stop audio recording");
   Serial.println("Touch GPIO2 → Capture a photo");
@@ -358,6 +376,9 @@ void startRecording() {
 
   totalBytesWritten = 0;
   isRecording = true;
+
+  // Haptic feedback: two short pulses = "recording started"
+  vibratePattern(2, 80, 80);
 }
 
 /**
@@ -388,6 +409,9 @@ void stopRecording() {
   writeWavHeader(recordFile, totalBytesWritten);
   recordFile.close();
 
+  // Haptic feedback: one long pulse = "recording stopped"
+  vibrateOnce(300);
+
   // Calculate duration for the user
   float durationSec = (float)totalBytesWritten
                       / (SAMPLE_RATE * CHANNELS * (BITS_PER_SAMPLE / 8));
@@ -405,6 +429,9 @@ void stopRecording() {
  * Captures a single JPEG frame from the camera and saves it to the SD card.
  */
 void captureImage() {
+  // Haptic feedback: one medium pulse = "photo captured"
+  vibrateOnce(150);
+
   String filename = generateNextFilename("/image_", ".jpg", imageFileIndex);
   Serial.printf("Capturing image → %s\n", filename.c_str());
 
@@ -501,4 +528,52 @@ String generateNextFilename(const char* prefix, const char* extension, int &inde
   } while (SD.exists(filename));
 
   return filename;
+}
+
+// =============================================================================
+//  VIBRATION MOTOR
+// =============================================================================
+
+/**
+ * Configures the vibration motor pin using LEDC PWM.
+ * Uses a dedicated LEDC channel to avoid conflicts with the camera.
+ */
+void initVibrationMotor() {
+  Serial.println("Initializing vibration motor...");
+  ledcSetup(VIBRATION_PWM_CHANNEL, VIBRATION_PWM_FREQ, VIBRATION_PWM_RES);
+  ledcAttachPin(VIBRATION_MOTOR_PIN, VIBRATION_PWM_CHANNEL);
+  ledcWrite(VIBRATION_PWM_CHANNEL, 0);  // Start with motor off
+  Serial.println("Vibration motor ready.");
+}
+
+/**
+ * Single vibration pulse at the configured intensity.
+ * @param durationMs  How long the motor stays on (milliseconds).
+ */
+void vibrateOnce(unsigned long durationMs) {
+  ledcWrite(VIBRATION_PWM_CHANNEL, vibrationIntensity);
+  delay(durationMs);
+  ledcWrite(VIBRATION_PWM_CHANNEL, 0);
+}
+
+/**
+ * Multiple vibration pulses with configurable on/off timing.
+ * @param pulses  Number of vibration pulses.
+ * @param onMs    Duration of each pulse (milliseconds).
+ * @param offMs   Pause between pulses (milliseconds).
+ *
+ * Patterns used in this project:
+ *   Start recording : vibratePattern(2, 80, 80)   → buzz-buzz (short double tap)
+ *   Stop recording  : vibrateOnce(300)             → buuuzz    (one long pulse)
+ *   Photo capture   : vibrateOnce(150)             → buzz      (one medium pulse)
+ */
+void vibratePattern(int pulses, unsigned long onMs, unsigned long offMs) {
+  for (int i = 0; i < pulses; i++) {
+    ledcWrite(VIBRATION_PWM_CHANNEL, vibrationIntensity);
+    delay(onMs);
+    ledcWrite(VIBRATION_PWM_CHANNEL, 0);
+    if (i < pulses - 1) {
+      delay(offMs);  // Pause between pulses (skip after last pulse)
+    }
+  }
 }

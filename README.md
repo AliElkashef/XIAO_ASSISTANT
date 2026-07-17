@@ -10,10 +10,13 @@ A simple Arduino project for the **Seeed Studio XIAO ESP32S3 Sense** that uses t
 |---|---|---|
 | Button 1 | GPIO 1 (D0) | Start/Stop audio recording → `audio_NNN.wav` |
 | Button 2 | GPIO 2 (D1) | Capture photo → `image_NNN.jpg` |
+| Vibration Motor | GPIO 3 (D2) | Haptic feedback on every touch action |
 
 - Sequential filenames — never overwrites existing files
 - Proper WAV header for playback compatibility
 - Software debounce — one touch = one action
+- Haptic feedback with distinct vibration patterns per action
+- Configurable vibration intensity via a single variable
 - Graceful error handling if any peripheral fails
 
 ---
@@ -79,6 +82,11 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 | MISO | GPIO 8 |
 | MOSI | GPIO 9 |
 
+### Vibration Motor
+| Function | GPIO |
+|---|---|
+| Motor PWM output | GPIO 3 (D2) |
+
 ### OV2640 Camera (Sense expansion board)
 | Function | GPIO |
 |---|---|
@@ -96,19 +104,22 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 
 | Function | Description |
 |---|---|
-| `setup()` | Initialises Serial, SD card, camera, and microphone. Prints status summary. |
+| `setup()` | Initialises Serial, SD card, camera, microphone, and vibration motor. |
 | `loop()` | Streams audio while recording; polls touch buttons when idle. |
 | `initSDCard()` | Mounts the SD card via SPI. Returns `true` on success. |
 | `initCamera()` | Configures and starts the OV2640 camera. Returns `true` on success. |
 | `initMicrophone()` | Installs the I2S driver in PDM-RX mode. Returns `true` on success. |
+| `initVibrationMotor()` | Configures GPIO 3 with LEDC PWM for motor control. |
 | `isTouched(pin)` | Reads capacitive touch value, applies debounce, waits for release. |
-| `startRecording()` | Opens a new WAV file, writes placeholder header, sets recording flag. |
+| `startRecording()` | Opens WAV file, sets recording flag, vibrates twice (buzz-buzz). |
 | `recordAudioChunk()` | Reads one I2S buffer and writes it to the open WAV file (called from loop). |
-| `stopRecording()` | Patches WAV header with actual size, closes file, prints duration. |
-| `captureImage()` | Orchestrates a photo capture: generates filename → calls `saveJpeg()`. |
+| `stopRecording()` | Patches WAV header, closes file, vibrates once long (buuuzz). |
+| `captureImage()` | Captures photo, vibrates once medium (buzz). |
 | `writeWavHeader(file, dataSize)` | Writes a standard 44-byte RIFF/WAV header for 16-bit mono PCM. |
 | `saveJpeg(path)` | Grabs camera frame buffer, writes JPEG bytes to file, releases buffer. |
 | `generateNextFilename(prefix, ext, index)` | Creates sequential filenames, skipping any that already exist on SD. |
+| `vibrateOnce(durationMs)` | Single vibration pulse at configured intensity. |
+| `vibratePattern(pulses, onMs, offMs)` | Multiple vibration pulses with configurable timing. |
 
 ---
 

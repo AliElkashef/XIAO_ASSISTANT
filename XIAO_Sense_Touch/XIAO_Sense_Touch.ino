@@ -60,6 +60,7 @@
 #include "SPI.h"               // SPI bus
 #include <WiFi.h>              // WiFi Access Point
 #include <WebServer.h>         // HTTP web server
+#include <esp_sleep.h>         // Deep sleep API
 
 // ─── WiFi Access Point Settings ──────────────────────────────────────────────
 
@@ -113,17 +114,26 @@ const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 #define I2S_READ_BUF_SIZE     1024      // Bytes per I2S read chunk
 #define MAX_RECORD_SEC        60        // Auto-stop after this many seconds
 
+// ─── Sleep Mode Parameters ─────────────────────────────────────────────────
+
+// How many seconds of inactivity before the device enters deep sleep.
+// Set to 0 to disable sleep mode entirely.
+#define SLEEP_TIMEOUT_SEC     120       // 2 minutes of inactivity→ sleep
+
+// Touch threshold for deep sleep wakeup (separate from normal threshold)
+#define SLEEP_TOUCH_THRESHOLD 22000
+
 // ─── Vibration Motor Parameters ──────────────────────────────────────────────
 
 // Vibration intensity: 0 (off) to 255 (max). Change this to adjust strength.
 // Suggested values:  64 = light,  128 = medium,  200 = strong,  255 = max
-static uint8_t vibrationIntensity = 128;   // ← DEFAULT: medium
+static uint8_t vibrationIntensity = 200;   // ← DEFAULT: medium
 
 // ─── Touch Sensor Parameters ─────────────────────────────────────────────────
 
 // On ESP32-S3, touchRead() values INCREASE when touched.
 // Adjust this threshold after checking Serial output during first boot.
-#define TOUCH_THRESHOLD       40000
+#define TOUCH_THRESHOLD       22000
 #define DEBOUNCE_MS           300       // Milliseconds between re-reads
 
 // ─── Global State ────────────────────────────────────────────────────────────
@@ -137,7 +147,8 @@ static bool isRecording     = false;  // True while a memory is being recorded
 // Recording state (used while isRecording == true)
 static File    recordFile;            // Open WAV file handle
 static uint32_t totalBytesWritten = 0;
-static unsigned long recordStartMs = 0; // millis() when recording started
+static unsigned long recordStartMs = 0;   // millis() when recording started
+static unsigned long lastActivityMs = 0;  // millis() of last user interaction
 
 // Web server instance
 WebServer server(80);
@@ -159,6 +170,9 @@ void   writeWavHeader(File &file, uint32_t dataSize);
 bool   isTouched(int pin);
 void   vibrateOnce(unsigned long durationMs);
 void   vibratePattern(int pulses, unsigned long onMs, unsigned long offMs);
+void   resetActivityTimer();
+void   checkSleepTimeout();
+void   enterDeepSleep();
 
 // Web server handlers
 void   handleRoot();
@@ -178,6 +192,14 @@ void setup() {
   Serial.println("  XIAO ESP32S3 Sense — Memory Recorder");
   Serial.println("==========================================");
 
+  // Check if we woke up from deep sleep
+  esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
+  if (wakeupCause == ESP_SLEEP_WAKEUP_TOUCHPAD) {
+    Serial.println("🔔 Woke up from touch!");
+  } else if (wakeupCause != 0) {
+    Serial.printf("🔔 Woke up — cause: %d\n", wakeupCause);
+  }
+
   // Initialise peripherals — each can fail independently
   sdReady     = initSDCard();
   cameraReady = initCamera();
@@ -185,6 +207,9 @@ void setup() {
   initVibrationMotor();
   initWiFiAP();
   setupWebServer();
+
+  // Start the activity timer
+  resetActivityTimer();
 
   Serial.println();
   Serial.println("--- Status Summary ---");
@@ -194,11 +219,17 @@ void setup() {
   Serial.printf("  Vibration : intensity %d/255\n", vibrationIntensity);
   Serial.printf("  WiFi AP   : %s\n", AP_SSID);
   Serial.println("  Web UI    : http://192.168.4.1");
+  Serial.printf("  Sleep     : after %d sec inactivity\n", SLEEP_TIMEOUT_SEC);
   Serial.println("----------------------");
   Serial.println();
   Serial.println("Touch GPIO1 → Start a new Memory (photo + audio)");
   Serial.println("Touch GPIO1 again → Stop recording & save Memory");
   Serial.println();
+
+  // Short vibration to confirm we're awake
+  if (wakeupCause == ESP_SLEEP_WAKEUP_TOUCHPAD) {
+    vibrateOnce(100);
+  }
 }
 
 // =============================================================================
@@ -240,6 +271,9 @@ void loop() {
     }
   }
 
+  // ── Check if we should go to sleep ──
+  checkSleepTimeout();
+
   delay(50);  // Small delay to keep loop responsive without hammering CPU
 }
 
@@ -262,6 +296,7 @@ bool isTouched(int pin) {
       while (touchRead(pin) > TOUCH_THRESHOLD) {
         delay(50);
       }
+      resetActivityTimer();  // User is active
       return true;
     }
   }
@@ -629,6 +664,76 @@ void vibratePattern(int pulses, unsigned long onMs, unsigned long offMs) {
 }
 
 // =============================================================================
+//  DEEP SLEEP MODE
+// =============================================================================
+
+/**
+ * Resets the inactivity timer. Call this whenever there's user interaction:
+ * touch events, web page requests, file downloads, etc.
+ */
+void resetActivityTimer() {
+  lastActivityMs = millis();
+}
+
+/**
+ * Checks if the inactivity timeout has been reached.
+ * Will NOT sleep if:
+ *   - Sleep is disabled (SLEEP_TIMEOUT_SEC == 0)
+ *   - Currently recording audio
+ *   - A WiFi client is connected
+ */
+void checkSleepTimeout() {
+  // Sleep disabled
+  if (SLEEP_TIMEOUT_SEC == 0) return;
+
+  // Don't sleep while recording
+  if (isRecording) {
+    resetActivityTimer();
+    return;
+  }
+
+  // Don't sleep if a WiFi client is connected
+  if (WiFi.softAPgetStationNum() > 0) {
+    resetActivityTimer();
+    return;
+  }
+
+  // Check if timeout has been reached
+  unsigned long elapsed = millis() - lastActivityMs;
+  if (elapsed >= (unsigned long)SLEEP_TIMEOUT_SEC * 1000UL) {
+    enterDeepSleep();
+  }
+}
+
+/**
+ * Puts the ESP32-S3 into deep sleep mode.
+ * The device will wake up when the touch pin is touched.
+ * On wake, the device reboots and runs setup() again.
+ */
+void enterDeepSleep() {
+  Serial.println();
+  Serial.println("💤 No activity detected — entering deep sleep...");
+  Serial.println("   Touch GPIO1 to wake up.");
+  Serial.println();
+  Serial.flush();
+
+  // Short double vibration to signal "going to sleep"
+  vibratePattern(3, 50, 50);
+  delay(200);
+
+  // Turn off WiFi to save power
+  server.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+
+  // Configure touch pin as wakeup source
+  touchSleepWakeUpEnable(TOUCH_BUTTON_MEMORY, SLEEP_TOUCH_THRESHOLD);
+
+  // Enter deep sleep (device reboots on wake)
+  esp_deep_sleep_start();
+}
+
+// =============================================================================
 //  WEB SERVER — HTML PAGE
 // =============================================================================
 
@@ -637,6 +742,7 @@ void vibratePattern(int pulses, unsigned long onMs, unsigned long offMs) {
  * that lists all memories with photo previews and audio players.
  */
 void handleRoot() {
+  resetActivityTimer();
   String html = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -989,6 +1095,7 @@ void handleRoot() {
  *           "audio":"/memory_001/audio.wav","hasPhoto":true,"hasAudio":true}]}
  */
 void handleListMemories() {
+  resetActivityTimer();
   if (!sdReady) {
     server.send(500, "application/json", "{\"error\":\"SD card not available\"}");
     return;
@@ -1038,6 +1145,7 @@ void handleListMemories() {
  * Usage: /file?path=/memory_001/photo.jpg
  */
 void handleFile() {
+  resetActivityTimer();
   if (!server.hasArg("path")) {
     server.send(400, "text/plain", "Missing 'path' parameter");
     return;
@@ -1079,6 +1187,7 @@ void handleFile() {
  * Usage: /api/delete?name=memory_001
  */
 void handleDelete() {
+  resetActivityTimer();
   if (!server.hasArg("name")) {
     server.send(400, "text/plain", "Missing 'name' parameter");
     return;

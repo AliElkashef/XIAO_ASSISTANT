@@ -48,6 +48,7 @@ The device creates a **WiFi hotspot**. Connect from your phone or laptop to brow
 
 - **One-button operation** — single touch pin does everything
 - **WiFi Access Point** — browse files from any device
+- **Deep Sleep mode** — auto-sleeps after inactivity, wakes on touch
 - Sequential filenames — never overwrites existing files
 - Proper WAV header for playback compatibility
 - Haptic feedback with distinct vibration patterns
@@ -70,6 +71,7 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 | `SPI.h` | SPI bus |
 | `WiFi.h` | WiFi Access Point |
 | `WebServer.h` | HTTP web server |
+| `esp_sleep.h` | Deep sleep API |
 
 ---
 
@@ -158,6 +160,9 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 | `handleListMemories()` | Returns JSON list of all memory folders. |
 | `handleFile()` | Streams a file from SD card to the browser. |
 | `handleDelete()` | Deletes a memory folder and its contents. |
+| `resetActivityTimer()` | Resets the inactivity timer (prevents sleep). |
+| `checkSleepTimeout()` | Checks if inactivity timeout reached; enters sleep if so. |
+| `enterDeepSleep()` | Shuts down WiFi, configures touch wakeup, enters deep sleep. |
 
 ---
 
@@ -167,6 +172,8 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 |---|---|---|
 | Start Memory | `buzz-buzz` (two short pulses) | 80ms on, 80ms off, 80ms on |
 | Stop Memory | `buuuzz` (one long pulse) | 300ms on |
+| Going to Sleep | `bz-bz-bz` (three quick pulses) | 50ms on, 50ms off ×3 |
+| Waking Up | `buzz` (one short pulse) | 100ms on |
 
 ### Vibration Intensity
 
@@ -178,6 +185,29 @@ Adjust `vibrationIntensity` at the top of the sketch:
 | `128` | **Medium (default)** |
 | `200` | Strong |
 | `255` | Maximum |
+---
+
+## Sleep Mode 💤
+
+To conserve battery, the device automatically enters **deep sleep** after a period of inactivity.
+
+| Setting | Default | Location in code |
+|---|---|---|
+| Inactivity timeout | `120` seconds (2 min) | `SLEEP_TIMEOUT_SEC` |
+| Touch wakeup threshold | `22000` | `SLEEP_TOUCH_THRESHOLD` |
+
+### What keeps it awake?
+- **Touch interaction** — any touch resets the timer
+- **WiFi client connected** — as long as someone is browsing files
+- **Active recording** — never sleeps during a memory capture
+
+### What happens when it sleeps?
+1. Vibrates 3 quick pulses (bz-bz-bz)
+2. Shuts down WiFi
+3. Enters deep sleep (~10 μA current draw)
+4. Touch the sensor → device reboots fully and vibrates once
+
+> **Tip:** Set `SLEEP_TIMEOUT_SEC` to `0` to disable sleep entirely.
 
 ---
 
@@ -229,6 +259,8 @@ The default threshold is `40000`. To calibrate for your setup:
 | Board not detected | Hold BOOT button while connecting USB |
 | Can't connect to WiFi | Look for `XIAO_Memory` in WiFi list, password: `12345678` |
 | Web page not loading | Make sure you're connected to the XIAO WiFi, open `http://192.168.4.1` |
+| Device keeps sleeping | Increase `SLEEP_TIMEOUT_SEC` or set to `0` to disable |
+| Won't wake from sleep | Check touch calibration; adjust `SLEEP_TOUCH_THRESHOLD` |
 
 ---
 

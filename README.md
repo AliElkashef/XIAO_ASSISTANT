@@ -1,21 +1,30 @@
-# XIAO ESP32S3 Sense — Touch-Triggered Audio & Camera
+# XIAO ESP32S3 Sense — Memory Recorder
 
-A simple Arduino project for the **Seeed Studio XIAO ESP32S3 Sense** that uses the built-in capacitive touch pins to record audio and capture photos, saving them to a microSD card.
+A simple Arduino project for the **Seeed Studio XIAO ESP32S3 Sense** that records "Memories" — a **photo + audio recording** saved together with a single touch.
+
+---
+
+## How It Works
+
+| Touch | Action |
+|---|---|
+| **First touch** (GPIO 1) | 📷 Capture photo + 🎙️ Start audio recording |
+| **Second touch** (GPIO 1) | ⏹️ Stop audio recording & save Memory |
+
+Each Memory produces two files with the same index:
+```
+memory_001.jpg   ← photo captured at the moment of touch
+memory_001.wav   ← audio recorded until you touch again
+```
 
 ---
 
 ## Features
 
-| Touch Button | GPIO | Action |
-|---|---|---|
-| Button 1 | GPIO 1 (D0) | Start/Stop audio recording → `audio_NNN.wav` |
-| Button 2 | GPIO 2 (D1) | Capture photo → `image_NNN.jpg` |
-| Vibration Motor | GPIO 3 (D2) | Haptic feedback on every touch action |
-
+- **One-button operation** — single touch pin does everything
 - Sequential filenames — never overwrites existing files
 - Proper WAV header for playback compatibility
-- Software debounce — one touch = one action
-- Haptic feedback with distinct vibration patterns per action
+- Haptic feedback with distinct vibration patterns
 - Configurable vibration intensity via a single variable
 - Graceful error handling if any peripheral fails
 
@@ -62,11 +71,15 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 
 ## Pin Definitions
 
-### Touch Buttons
+### Touch Button
 | Function | GPIO |
 |---|---|
-| Record Audio | GPIO 1 (D0) |
-| Capture Photo | GPIO 2 (D1) |
+| Start/Stop Memory | GPIO 1 (D0) |
+
+### Vibration Motor
+| Function | GPIO |
+|---|---|
+| Motor PWM output | GPIO 3 (D2) |
 
 ### PDM Microphone (Sense expansion board)
 | Function | GPIO |
@@ -81,11 +94,6 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 | SCK | GPIO 7 |
 | MISO | GPIO 8 |
 | MOSI | GPIO 9 |
-
-### Vibration Motor
-| Function | GPIO |
-|---|---|
-| Motor PWM output | GPIO 3 (D2) |
 
 ### OV2640 Camera (Sense expansion board)
 | Function | GPIO |
@@ -104,22 +112,41 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 
 | Function | Description |
 |---|---|
-| `setup()` | Initialises Serial, SD card, camera, microphone, and vibration motor. |
-| `loop()` | Streams audio while recording; polls touch buttons when idle. |
+| `setup()` | Initialises all peripherals and prints status summary. |
+| `loop()` | Streams audio while recording; polls touch button when idle. |
 | `initSDCard()` | Mounts the SD card via SPI. Returns `true` on success. |
 | `initCamera()` | Configures and starts the OV2640 camera. Returns `true` on success. |
 | `initMicrophone()` | Installs the I2S driver in PDM-RX mode. Returns `true` on success. |
 | `initVibrationMotor()` | Configures GPIO 3 with LEDC PWM for motor control. |
 | `isTouched(pin)` | Reads capacitive touch value, applies debounce, waits for release. |
-| `startRecording()` | Opens WAV file, sets recording flag, vibrates twice (buzz-buzz). |
-| `recordAudioChunk()` | Reads one I2S buffer and writes it to the open WAV file (called from loop). |
-| `stopRecording()` | Patches WAV header, closes file, vibrates once long (buuuzz). |
-| `captureImage()` | Captures photo, vibrates once medium (buzz). |
+| `startMemory()` | Captures photo, opens WAV file, starts recording, vibrates (buzz-buzz). |
+| `stopMemory()` | Patches WAV header, closes file, vibrates (buuuzz), prints summary. |
+| `recordAudioChunk()` | Reads one I2S buffer and writes it to the open WAV file. |
+| `savePhoto(path)` | Captures JPEG frame and writes to SD. Returns `true` on success. |
 | `writeWavHeader(file, dataSize)` | Writes a standard 44-byte RIFF/WAV header for 16-bit mono PCM. |
-| `saveJpeg(path)` | Grabs camera frame buffer, writes JPEG bytes to file, releases buffer. |
-| `generateNextFilename(prefix, ext, index)` | Creates sequential filenames, skipping any that already exist on SD. |
+| `findNextMemoryIndex()` | Finds next index where neither .jpg nor .wav exists on SD. |
 | `vibrateOnce(durationMs)` | Single vibration pulse at configured intensity. |
 | `vibratePattern(pulses, onMs, offMs)` | Multiple vibration pulses with configurable timing. |
+
+---
+
+## Haptic Feedback Patterns
+
+| Event | Pattern | Timing |
+|---|---|---|
+| Start Memory | `buzz-buzz` (two short pulses) | 80ms on, 80ms off, 80ms on |
+| Stop Memory | `buuuzz` (one long pulse) | 300ms on |
+
+### Vibration Intensity
+
+Adjust `vibrationIntensity` at the top of the sketch:
+
+| Value | Strength |
+|---|---|
+| `64` | Light |
+| `128` | **Medium (default)** |
+| `200` | Strong |
+| `255` | Maximum |
 
 ---
 
@@ -141,8 +168,9 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 
 1. Attach the **Sense expansion board** to the XIAO ESP32S3 via the B2B connector.
 2. Insert a **FAT32-formatted** microSD card (≤ 32 GB recommended).
-3. Connect the board via USB-C.
-4. If the board does not appear as a COM port, hold **BOOT** while plugging in.
+3. Connect vibration motor to **GPIO 3 (D2)** via a transistor/MOSFET.
+4. Connect the board via USB-C.
+5. If the board does not appear as a COM port, hold **BOOT** while plugging in.
 
 ---
 
@@ -150,8 +178,8 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 
 The default threshold is `40000`. To calibrate for your setup:
 
-1. Upload the sketch and open the Serial Monitor at **115200 baud**.
-2. Add a temporary `Serial.println(touchRead(1));` inside `loop()`.
+1. Upload the `Touch_Test` sketch first (included in this repo).
+2. Open the Serial Monitor at **115200 baud**.
 3. Note the **idle** value (not touching) and the **touched** value.
 4. Set `TOUCH_THRESHOLD` to roughly halfway between the two.
 

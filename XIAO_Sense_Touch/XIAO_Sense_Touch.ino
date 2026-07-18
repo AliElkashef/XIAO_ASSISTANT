@@ -1,16 +1,25 @@
 /*
  * =============================================================================
- *  XIAO ESP32S3 Sense — Touch-Triggered Audio Recorder & Camera
+ *  XIAO ESP32S3 Sense — Memory Recorder (Photo + Audio)
  * =============================================================================
  *
  *  Board  : Seeed Studio XIAO ESP32S3 Sense
  *  IDE    : Arduino IDE 2.x+
  *
- *  Features
- *  --------
- *  • Touch Button 1 (GPIO 1 / D0)  → Start/Stop audio recording → WAV on SD
- *  • Touch Button 2 (GPIO 2 / D1)  → Capture a JPEG photo       → JPG on SD
- *  • Vibration motor (GPIO 3 / D2)  → Haptic feedback on touch actions
+ *  Concept
+ *  -------
+ *  A "Memory" is a photo + audio recording saved together.
+ *
+ *  • First touch  (GPIO 1 / D0) → Capture photo + Start audio recording
+ *  • Second touch (GPIO 1 / D0) → Stop audio recording
+ *
+ *  Both files share the same index:
+ *    memory_001.jpg  +  memory_001.wav
+ *    memory_002.jpg  +  memory_002.wav
+ *
+ *  Haptic feedback (vibration motor on GPIO 3 / D2):
+ *    Start memory : buzz-buzz  (two short pulses)
+ *    Stop memory  : buuuzz     (one long pulse)
  *
  *  Libraries used (all built-in with the ESP32-S3 board package)
  *  ---------------------------------------------------------------
@@ -41,9 +50,8 @@
 
 // ─── Pin Definitions ─────────────────────────────────────────────────────────
 
-// Touch buttons (ESP32-S3 capacitive touch)
-#define TOUCH_BUTTON_RECORD   1   // GPIO 1  (D0) — record audio
-#define TOUCH_BUTTON_PHOTO    2   // GPIO 2  (D1) — capture photo
+// Touch button (ESP32-S3 capacitive touch) — single button for memory
+#define TOUCH_BUTTON_MEMORY   1   // GPIO 1  (D0) — start/stop memory
 
 // Vibration motor (connected via transistor/MOSFET to this pin)
 #define VIBRATION_MOTOR_PIN   3   // GPIO 3  (D2) — vibration motor
@@ -101,15 +109,14 @@ static uint8_t vibrationIntensity = 128;   // ← DEFAULT: medium
 
 // ─── Global State ────────────────────────────────────────────────────────────
 
-static int audioFileIndex  = 0;      // Next index for audio_NNN.wav
-static int imageFileIndex  = 0;      // Next index for image_NNN.jpg
-static bool sdReady        = false;
-static bool cameraReady    = false;
-static bool micReady       = false;
-static bool isRecording    = false;  // True while audio recording is active
+static int  memoryIndex     = 0;      // Next index for memory_NNN files
+static bool sdReady         = false;
+static bool cameraReady     = false;
+static bool micReady        = false;
+static bool isRecording     = false;  // True while a memory is being recorded
 
 // Recording state (used while isRecording == true)
-static File    recordFile;           // Open WAV file handle
+static File    recordFile;            // Open WAV file handle
 static uint32_t totalBytesWritten = 0;
 
 // ─── Forward Declarations ────────────────────────────────────────────────────
@@ -118,13 +125,12 @@ bool   initSDCard();
 bool   initCamera();
 bool   initMicrophone();
 void   initVibrationMotor();
-void   startRecording();
-void   stopRecording();
+void   startMemory();
+void   stopMemory();
 void   recordAudioChunk();
-void   captureImage();
-String generateNextFilename(const char* prefix, const char* extension, int &index);
+int    findNextMemoryIndex();
+bool   savePhoto(const char* path);
 void   writeWavHeader(File &file, uint32_t dataSize);
-void   saveJpeg(const char* path);
 bool   isTouched(int pin);
 void   vibrateOnce(unsigned long durationMs);
 void   vibratePattern(int pulses, unsigned long onMs, unsigned long offMs);
@@ -137,9 +143,9 @@ void setup() {
   Serial.begin(115200);
   delay(1000);  // Give Serial time to connect
   Serial.println();
-  Serial.println("========================================");
-  Serial.println("  XIAO ESP32S3 Sense — Touch Recorder");
-  Serial.println("========================================");
+  Serial.println("==========================================");
+  Serial.println("  XIAO ESP32S3 Sense — Memory Recorder");
+  Serial.println("==========================================");
 
   // Initialise peripherals — each can fail independently
   sdReady     = initSDCard();
@@ -154,8 +160,9 @@ void setup() {
   Serial.printf("  Microphone: %s\n", micReady    ? "OK" : "FAIL");
   Serial.printf("  Vibration : intensity %d/255\n", vibrationIntensity);
   Serial.println("----------------------");
-  Serial.println("Touch GPIO1 → Start / Stop audio recording");
-  Serial.println("Touch GPIO2 → Capture a photo");
+  Serial.println();
+  Serial.println("Touch GPIO1 → Start a new Memory (photo + audio)");
+  Serial.println("Touch GPIO1 again → Stop recording & save Memory");
   Serial.println();
 }
 
@@ -170,33 +177,23 @@ void loop() {
     recordAudioChunk();
 
     // Check if user wants to stop
-    if (isTouched(TOUCH_BUTTON_RECORD)) {
-      stopRecording();
+    if (isTouched(TOUCH_BUTTON_MEMORY)) {
+      stopMemory();
     }
-    return;  // Don't process other buttons while recording
+    return;  // Don't do anything else while recording
   }
 
-  // ── Touch Button 1 — Start Audio Recording ──
-  if (isTouched(TOUCH_BUTTON_RECORD)) {
-    Serial.println("[Touch] Button 1 detected — Start Recording");
+  // ── Idle: wait for touch to start a new Memory ──
+  if (isTouched(TOUCH_BUTTON_MEMORY)) {
+    Serial.println("[Touch] Detected — Starting new Memory...");
     if (!sdReady) {
-      Serial.println("[Error] SD card not available — cannot record.");
-    } else if (!micReady) {
-      Serial.println("[Error] Microphone not available — cannot record.");
-    } else {
-      startRecording();
-    }
-  }
-
-  // ── Touch Button 2 — Photo Capture ──
-  if (isTouched(TOUCH_BUTTON_PHOTO)) {
-    Serial.println("[Touch] Button 2 detected — Photo");
-    if (!sdReady) {
-      Serial.println("[Error] SD card not available — cannot save image.");
+      Serial.println("[Error] SD card not available.");
     } else if (!cameraReady) {
-      Serial.println("[Error] Camera not available — cannot capture.");
+      Serial.println("[Error] Camera not available.");
+    } else if (!micReady) {
+      Serial.println("[Error] Microphone not available.");
     } else {
-      captureImage();
+      startMemory();
     }
   }
 
@@ -353,21 +350,43 @@ bool initMicrophone() {
 }
 
 // =============================================================================
-//  AUDIO RECORDING  (Start / Stop toggle)
+//  MEMORY — START  (Photo + Audio Recording)
 // =============================================================================
 
 /**
- * Opens a new WAV file, writes a placeholder header, and sets the recording
- * flag. From this point, loop() calls recordAudioChunk() every iteration.
+ * Starts a new "Memory":
+ *  1. Finds the next available index (e.g. 005)
+ *  2. Captures a photo → memory_005.jpg
+ *  3. Opens a WAV file  → memory_005.wav  and starts recording audio
+ *
+ * If the photo fails, the memory is aborted (no audio file is created).
  */
-void startRecording() {
-  String filename = generateNextFilename("/audio_", ".wav", audioFileIndex);
-  Serial.printf("Recording started → %s\n", filename.c_str());
-  Serial.println("Touch Button 1 again to stop.");
+void startMemory() {
+  // Find next available index where neither .jpg nor .wav exists
+  int idx = findNextMemoryIndex();
 
-  recordFile = SD.open(filename.c_str(), FILE_WRITE);
+  // Build filenames with the same index
+  char jpgPath[32];
+  char wavPath[32];
+  snprintf(jpgPath, sizeof(jpgPath), "/memory_%03d.jpg", idx);
+  snprintf(wavPath, sizeof(wavPath), "/memory_%03d.wav", idx);
+
+  Serial.println("────────────────────────────────");
+  Serial.printf("  Memory #%03d — Starting\n", idx);
+  Serial.println("────────────────────────────────");
+
+  // ── Step 1: Capture photo ──
+  Serial.printf("  📷 Capturing photo → %s\n", jpgPath);
+  if (!savePhoto(jpgPath)) {
+    Serial.println("[Error] Photo capture failed — Memory aborted.");
+    return;
+  }
+
+  // ── Step 2: Start audio recording ──
+  Serial.printf("  🎙️ Recording audio → %s\n", wavPath);
+  recordFile = SD.open(wavPath, FILE_WRITE);
   if (!recordFile) {
-    Serial.println("[Error] Could not create WAV file.");
+    Serial.println("[Error] Could not create WAV file — Memory aborted.");
     return;
   }
 
@@ -377,9 +396,46 @@ void startRecording() {
   totalBytesWritten = 0;
   isRecording = true;
 
-  // Haptic feedback: two short pulses = "recording started"
+  // Haptic feedback: two short pulses = "memory started"
   vibratePattern(2, 80, 80);
+
+  Serial.println("  Touch again to stop recording.");
+  Serial.println("────────────────────────────────");
 }
+
+// =============================================================================
+//  MEMORY — STOP  (Finalize Audio)
+// =============================================================================
+
+/**
+ * Stops the audio recording, patches the WAV header, closes the file,
+ * and prints a summary of the completed Memory.
+ */
+void stopMemory() {
+  isRecording = false;
+
+  // Patch the WAV header with the real data size
+  recordFile.seek(0);
+  writeWavHeader(recordFile, totalBytesWritten);
+  recordFile.close();
+
+  // Haptic feedback: one long pulse = "memory saved"
+  vibrateOnce(300);
+
+  // Calculate duration for the user
+  float durationSec = (float)totalBytesWritten
+                      / (SAMPLE_RATE * CHANNELS * (BITS_PER_SAMPLE / 8));
+
+  Serial.println("────────────────────────────────");
+  Serial.println("  ✅ Memory Saved!");
+  Serial.printf("  Audio duration: %.1f seconds\n", durationSec);
+  Serial.printf("  Audio size: %u bytes\n", totalBytesWritten + 44);
+  Serial.println("────────────────────────────────\n");
+}
+
+// =============================================================================
+//  AUDIO CHUNK (called from loop while recording)
+// =============================================================================
 
 /**
  * Reads one chunk of audio data from the I2S microphone and writes it
@@ -397,45 +453,39 @@ void recordAudioChunk() {
   }
 }
 
-/**
- * Stops recording: patches the WAV header with the actual data size,
- * closes the file, and prints a summary.
- */
-void stopRecording() {
-  isRecording = false;
-
-  // Patch the WAV header with the real data size
-  recordFile.seek(0);
-  writeWavHeader(recordFile, totalBytesWritten);
-  recordFile.close();
-
-  // Haptic feedback: one long pulse = "recording stopped"
-  vibrateOnce(300);
-
-  // Calculate duration for the user
-  float durationSec = (float)totalBytesWritten
-                      / (SAMPLE_RATE * CHANNELS * (BITS_PER_SAMPLE / 8));
-
-  Serial.println("Recording stopped.");
-  Serial.printf("Duration: %.1f seconds  |  Size: %u bytes\n\n",
-                durationSec, totalBytesWritten + 44);
-}
-
 // =============================================================================
-//  IMAGE CAPTURE
+//  SAVE PHOTO
 // =============================================================================
 
 /**
- * Captures a single JPEG frame from the camera and saves it to the SD card.
+ * Grabs the latest JPEG frame from the camera frame buffer and writes it
+ * to the SD card. Releases the frame buffer when done.
+ * Returns true on success, false on failure.
  */
-void captureImage() {
-  // Haptic feedback: one medium pulse = "photo captured"
-  vibrateOnce(150);
+bool savePhoto(const char* path) {
+  // Grab a frame
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("[Error] Camera capture failed.");
+    return false;
+  }
 
-  String filename = generateNextFilename("/image_", ".jpg", imageFileIndex);
-  Serial.printf("Capturing image → %s\n", filename.c_str());
+  // Open file and write
+  File file = SD.open(path, FILE_WRITE);
+  if (!file) {
+    Serial.println("[Error] Could not create image file.");
+    esp_camera_fb_return(fb);
+    return false;
+  }
 
-  saveJpeg(filename.c_str());
+  file.write(fb->buf, fb->len);
+  file.close();
+
+  Serial.printf("  Photo saved (%u bytes)\n", fb->len);
+
+  // Release the frame buffer back to the driver
+  esp_camera_fb_return(fb);
+  return true;
 }
 
 // =============================================================================
@@ -477,57 +527,25 @@ void writeWavHeader(File &file, uint32_t dataSize) {
 }
 
 // =============================================================================
-//  SAVE JPEG
+//  FILENAME INDEX GENERATOR
 // =============================================================================
 
 /**
- * Grabs the latest JPEG frame from the camera frame buffer and writes it
- * to the SD card. Releases the frame buffer when done.
+ * Finds the next available memory index where NEITHER memory_NNN.jpg
+ * NOR memory_NNN.wav exists on the SD card. This ensures both files
+ * of a memory always share the same index and nothing is overwritten.
  */
-void saveJpeg(const char* path) {
-  // Grab a frame
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("[Error] Camera capture failed.");
-    return;
-  }
+int findNextMemoryIndex() {
+  char jpgPath[32];
+  char wavPath[32];
 
-  // Open file and write
-  File file = SD.open(path, FILE_WRITE);
-  if (!file) {
-    Serial.println("[Error] Could not create image file.");
-    esp_camera_fb_return(fb);
-    return;
-  }
-
-  file.write(fb->buf, fb->len);
-  file.close();
-
-  Serial.printf("Image saved: %s (%u bytes)\n\n", path, fb->len);
-
-  // Release the frame buffer back to the driver
-  esp_camera_fb_return(fb);
-}
-
-// =============================================================================
-//  FILENAME GENERATOR
-// =============================================================================
-
-/**
- * Generates sequential filenames like /audio_001.wav, /audio_002.wav, ...
- * Skips any index that already exists on the SD card so files are never
- * overwritten. Updates `index` in-place for the next call.
- */
-String generateNextFilename(const char* prefix, const char* extension, int &index) {
-  String filename;
   do {
-    index++;
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%s%03d%s", prefix, index, extension);
-    filename = String(buf);
-  } while (SD.exists(filename));
+    memoryIndex++;
+    snprintf(jpgPath, sizeof(jpgPath), "/memory_%03d.jpg", memoryIndex);
+    snprintf(wavPath, sizeof(wavPath), "/memory_%03d.wav", memoryIndex);
+  } while (SD.exists(jpgPath) || SD.exists(wavPath));
 
-  return filename;
+  return memoryIndex;
 }
 
 // =============================================================================
@@ -563,9 +581,8 @@ void vibrateOnce(unsigned long durationMs) {
  * @param offMs   Pause between pulses (milliseconds).
  *
  * Patterns used in this project:
- *   Start recording : vibratePattern(2, 80, 80)   → buzz-buzz (short double tap)
- *   Stop recording  : vibrateOnce(300)             → buuuzz    (one long pulse)
- *   Photo capture   : vibrateOnce(150)             → buzz      (one medium pulse)
+ *   Start memory : vibratePattern(2, 80, 80)  → buzz-buzz  (double tap)
+ *   Stop memory  : vibrateOnce(300)            → buuuzz     (one long pulse)
  */
 void vibratePattern(int pulses, unsigned long onMs, unsigned long offMs) {
   for (int i = 0; i < pulses; i++) {

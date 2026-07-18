@@ -11,10 +11,15 @@ A simple Arduino project for the **Seeed Studio XIAO ESP32S3 Sense** that record
 | **First touch** (GPIO 1) | 📷 Capture photo + 🎙️ Start audio recording |
 | **Second touch** (GPIO 1) | ⏹️ Stop audio recording & save Memory |
 
-Each Memory produces two files with the same index:
+Each Memory is saved in its own folder:
 ```
-memory_001.jpg   ← photo captured at the moment of touch
-memory_001.wav   ← audio recorded until you touch again
+📁 memory_001/
+   ├── photo.jpg   ← photo captured at the moment of touch
+   └── audio.wav   ← audio recorded until you touch again
+
+📁 memory_002/
+   ├── photo.jpg
+   └── audio.wav
 ```
 
 ---

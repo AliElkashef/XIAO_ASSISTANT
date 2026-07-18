@@ -356,33 +356,43 @@ bool initMicrophone() {
 /**
  * Starts a new "Memory":
  *  1. Finds the next available index (e.g. 005)
- *  2. Captures a photo → memory_005.jpg
- *  3. Opens a WAV file  → memory_005.wav  and starts recording audio
+ *  2. Creates a folder  → /memory_005/
+ *  3. Captures a photo  → /memory_005/photo.jpg
+ *  4. Opens a WAV file  → /memory_005/audio.wav  and starts recording
  *
  * If the photo fails, the memory is aborted (no audio file is created).
  */
 void startMemory() {
-  // Find next available index where neither .jpg nor .wav exists
+  // Find next available index (folder doesn't exist yet)
   int idx = findNextMemoryIndex();
 
-  // Build filenames with the same index
-  char jpgPath[32];
-  char wavPath[32];
-  snprintf(jpgPath, sizeof(jpgPath), "/memory_%03d.jpg", idx);
-  snprintf(wavPath, sizeof(wavPath), "/memory_%03d.wav", idx);
+  // Build folder and file paths
+  char folderPath[32];
+  char jpgPath[48];
+  char wavPath[48];
+  snprintf(folderPath, sizeof(folderPath), "/memory_%03d", idx);
+  snprintf(jpgPath,    sizeof(jpgPath),    "/memory_%03d/photo.jpg", idx);
+  snprintf(wavPath,    sizeof(wavPath),    "/memory_%03d/audio.wav", idx);
 
   Serial.println("────────────────────────────────");
   Serial.printf("  Memory #%03d — Starting\n", idx);
   Serial.println("────────────────────────────────");
 
-  // ── Step 1: Capture photo ──
+  // ── Step 1: Create folder ──
+  if (!SD.mkdir(folderPath)) {
+    Serial.printf("[Error] Could not create folder %s — Memory aborted.\n", folderPath);
+    return;
+  }
+  Serial.printf("  📁 Folder created: %s\n", folderPath);
+
+  // ── Step 2: Capture photo ──
   Serial.printf("  📷 Capturing photo → %s\n", jpgPath);
   if (!savePhoto(jpgPath)) {
     Serial.println("[Error] Photo capture failed — Memory aborted.");
     return;
   }
 
-  // ── Step 2: Start audio recording ──
+  // ── Step 3: Start audio recording ──
   Serial.printf("  🎙️ Recording audio → %s\n", wavPath);
   recordFile = SD.open(wavPath, FILE_WRITE);
   if (!recordFile) {
@@ -531,19 +541,17 @@ void writeWavHeader(File &file, uint32_t dataSize) {
 // =============================================================================
 
 /**
- * Finds the next available memory index where NEITHER memory_NNN.jpg
- * NOR memory_NNN.wav exists on the SD card. This ensures both files
- * of a memory always share the same index and nothing is overwritten.
+ * Finds the next available memory index where the folder /memory_NNN/
+ * does not yet exist on the SD card. This ensures each memory gets
+ * its own unique folder and nothing is overwritten.
  */
 int findNextMemoryIndex() {
-  char jpgPath[32];
-  char wavPath[32];
+  char folderPath[32];
 
   do {
     memoryIndex++;
-    snprintf(jpgPath, sizeof(jpgPath), "/memory_%03d.jpg", memoryIndex);
-    snprintf(wavPath, sizeof(wavPath), "/memory_%03d.wav", memoryIndex);
-  } while (SD.exists(jpgPath) || SD.exists(wavPath));
+    snprintf(folderPath, sizeof(folderPath), "/memory_%03d", memoryIndex);
+  } while (SD.exists(folderPath));
 
   return memoryIndex;
 }

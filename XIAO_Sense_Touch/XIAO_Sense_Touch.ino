@@ -93,6 +93,7 @@
 #define I2S_DMA_BUF_COUNT     8
 #define I2S_DMA_BUF_LEN       512
 #define I2S_READ_BUF_SIZE     1024      // Bytes per I2S read chunk
+#define MAX_RECORD_SEC        60        // Auto-stop after this many seconds
 
 // ─── Vibration Motor Parameters ──────────────────────────────────────────────
 
@@ -118,6 +119,7 @@ static bool isRecording     = false;  // True while a memory is being recorded
 // Recording state (used while isRecording == true)
 static File    recordFile;            // Open WAV file handle
 static uint32_t totalBytesWritten = 0;
+static unsigned long recordStartMs = 0; // millis() when recording started
 
 // ─── Forward Declarations ────────────────────────────────────────────────────
 
@@ -171,13 +173,18 @@ void setup() {
 // =============================================================================
 
 void loop() {
-  // ── While recording: stream audio data and check for stop touch ──
+  // ── While recording: stream audio data and check for stop ──
   if (isRecording) {
     // Keep writing audio chunks to the SD card
     recordAudioChunk();
 
-    // Check if user wants to stop
-    if (isTouched(TOUCH_BUTTON_MEMORY)) {
+    // Auto-stop if max duration reached
+    if ((millis() - recordStartMs) >= (unsigned long)MAX_RECORD_SEC * 1000UL) {
+      Serial.println("[Auto] Max recording time reached.");
+      stopMemory();
+    }
+    // Check if user wants to stop manually
+    else if (isTouched(TOUCH_BUTTON_MEMORY)) {
       stopMemory();
     }
     return;  // Don't do anything else while recording
@@ -404,6 +411,7 @@ void startMemory() {
   writeWavHeader(recordFile, 0);
 
   totalBytesWritten = 0;
+  recordStartMs = millis();
   isRecording = true;
 
   // Haptic feedback: two short pulses = "memory started"

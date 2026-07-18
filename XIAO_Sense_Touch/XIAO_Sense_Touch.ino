@@ -1,6 +1,6 @@
 /*
  * =============================================================================
- *  XIAO ESP32S3 Sense — Memory Recorder (Photo + Audio)
+ *  XIAO ESP32S3 Sense — Memory Recorder (Photo + Audio) + WiFi File Browser
  * =============================================================================
  *
  *  Board  : Seeed Studio XIAO ESP32S3 Sense
@@ -13,9 +13,18 @@
  *  • First touch  (GPIO 1 / D0) → Capture photo + Start audio recording
  *  • Second touch (GPIO 1 / D0) → Stop audio recording
  *
- *  Both files share the same index:
- *    memory_001.jpg  +  memory_001.wav
- *    memory_002.jpg  +  memory_002.wav
+ *  Files are saved in folders:
+ *    /memory_001/photo.jpg  +  /memory_001/audio.wav
+ *    /memory_002/photo.jpg  +  /memory_002/audio.wav
+ *
+ *  WiFi Access Point
+ *  -----------------
+ *  The device creates a WiFi hotspot. Connect from your phone/laptop
+ *  to browse, view, and download all saved memories.
+ *
+ *    SSID     : XIAO_Memory
+ *    Password : 12345678
+ *    URL      : http://192.168.4.1
  *
  *  Haptic feedback (vibration motor on GPIO 3 / D2):
  *    Start memory : buzz-buzz  (two short pulses)
@@ -27,6 +36,8 @@
  *  - driver/i2s.h    — I2S / PDM microphone driver
  *  - FS.h / SD.h     — file system & SD card (SPI mode)
  *  - SPI.h           — SPI bus for SD card
+ *  - WiFi.h          — WiFi Access Point
+ *  - WebServer.h     — HTTP web server
  *
  *  Board settings in Arduino IDE
  *  ------------------------------
@@ -47,6 +58,13 @@
 #include "FS.h"                // File system abstraction
 #include "SD.h"                // SD card library (SPI mode)
 #include "SPI.h"               // SPI bus
+#include <WiFi.h>              // WiFi Access Point
+#include <WebServer.h>         // HTTP web server
+
+// ─── WiFi Access Point Settings ──────────────────────────────────────────────
+
+const char* AP_SSID     = "XIAO_Memory";   // WiFi network name
+const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 
 // ─── Pin Definitions ─────────────────────────────────────────────────────────
 
@@ -121,12 +139,17 @@ static File    recordFile;            // Open WAV file handle
 static uint32_t totalBytesWritten = 0;
 static unsigned long recordStartMs = 0; // millis() when recording started
 
+// Web server instance
+WebServer server(80);
+
 // ─── Forward Declarations ────────────────────────────────────────────────────
 
 bool   initSDCard();
 bool   initCamera();
 bool   initMicrophone();
 void   initVibrationMotor();
+void   initWiFiAP();
+void   setupWebServer();
 void   startMemory();
 void   stopMemory();
 void   recordAudioChunk();
@@ -136,6 +159,12 @@ void   writeWavHeader(File &file, uint32_t dataSize);
 bool   isTouched(int pin);
 void   vibrateOnce(unsigned long durationMs);
 void   vibratePattern(int pulses, unsigned long onMs, unsigned long offMs);
+
+// Web server handlers
+void   handleRoot();
+void   handleListMemories();
+void   handleFile();
+void   handleDelete();
 
 // =============================================================================
 //  SETUP
@@ -154,6 +183,8 @@ void setup() {
   cameraReady = initCamera();
   micReady    = initMicrophone();
   initVibrationMotor();
+  initWiFiAP();
+  setupWebServer();
 
   Serial.println();
   Serial.println("--- Status Summary ---");
@@ -161,6 +192,8 @@ void setup() {
   Serial.printf("  Camera    : %s\n", cameraReady ? "OK" : "FAIL");
   Serial.printf("  Microphone: %s\n", micReady    ? "OK" : "FAIL");
   Serial.printf("  Vibration : intensity %d/255\n", vibrationIntensity);
+  Serial.printf("  WiFi AP   : %s\n", AP_SSID);
+  Serial.println("  Web UI    : http://192.168.4.1");
   Serial.println("----------------------");
   Serial.println();
   Serial.println("Touch GPIO1 → Start a new Memory (photo + audio)");
@@ -173,6 +206,9 @@ void setup() {
 // =============================================================================
 
 void loop() {
+  // Always handle web server requests
+  server.handleClient();
+
   // ── While recording: stream audio data and check for stop ──
   if (isRecording) {
     // Keep writing audio chunks to the SD card
@@ -187,7 +223,7 @@ void loop() {
     else if (isTouched(TOUCH_BUTTON_MEMORY)) {
       stopMemory();
     }
-    return;  // Don't do anything else while recording
+    return;  // Don't check for new memory touch while recording
   }
 
   // ── Idle: wait for touch to start a new Memory ──
@@ -357,6 +393,35 @@ bool initMicrophone() {
 }
 
 // =============================================================================
+//  WiFi ACCESS POINT
+// =============================================================================
+
+/**
+ * Creates a WiFi hotspot so you can connect from a phone or laptop
+ * to browse the saved memories via a web browser.
+ */
+void initWiFiAP() {
+  Serial.println("Starting WiFi Access Point...");
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  IPAddress ip = WiFi.softAPIP();
+  Serial.printf("WiFi AP ready — SSID: %s\n", AP_SSID);
+  Serial.printf("Connect and open: http://%s\n", ip.toString().c_str());
+}
+
+// =============================================================================
+//  WEB SERVER SETUP
+// =============================================================================
+
+void setupWebServer() {
+  server.on("/",          HTTP_GET, handleRoot);
+  server.on("/api/list",  HTTP_GET, handleListMemories);
+  server.on("/file",      HTTP_GET, handleFile);
+  server.on("/api/delete",HTTP_GET, handleDelete);
+  server.begin();
+  Serial.println("Web server started on port 80.");
+}
+
+// =============================================================================
 //  MEMORY — START  (Photo + Audio Recording)
 // =============================================================================
 
@@ -455,10 +520,6 @@ void stopMemory() {
 //  AUDIO CHUNK (called from loop while recording)
 // =============================================================================
 
-/**
- * Reads one chunk of audio data from the I2S microphone and writes it
- * to the open WAV file. Called repeatedly from loop() while recording.
- */
 void recordAudioChunk() {
   uint8_t buffer[I2S_READ_BUF_SIZE];
   size_t bytesRead = 0;
@@ -475,20 +536,13 @@ void recordAudioChunk() {
 //  SAVE PHOTO
 // =============================================================================
 
-/**
- * Grabs the latest JPEG frame from the camera frame buffer and writes it
- * to the SD card. Releases the frame buffer when done.
- * Returns true on success, false on failure.
- */
 bool savePhoto(const char* path) {
-  // Grab a frame
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("[Error] Camera capture failed.");
     return false;
   }
 
-  // Open file and write
   File file = SD.open(path, FILE_WRITE);
   if (!file) {
     Serial.println("[Error] Could not create image file.");
@@ -498,10 +552,7 @@ bool savePhoto(const char* path) {
 
   file.write(fb->buf, fb->len);
   file.close();
-
   Serial.printf("  Photo saved (%u bytes)\n", fb->len);
-
-  // Release the frame buffer back to the driver
   esp_camera_fb_return(fb);
   return true;
 }
@@ -510,25 +561,19 @@ bool savePhoto(const char* path) {
 //  WAV HEADER
 // =============================================================================
 
-/**
- * Writes a standard 44-byte RIFF/WAV header for 16-bit mono PCM.
- * Call once before writing data, then seek(0) and call again to patch sizes.
- */
 void writeWavHeader(File &file, uint32_t dataSize) {
   uint32_t byteRate   = SAMPLE_RATE * CHANNELS * (BITS_PER_SAMPLE / 8);
   uint16_t blockAlign = CHANNELS * (BITS_PER_SAMPLE / 8);
 
-  // RIFF chunk
   file.write((const uint8_t*)"RIFF", 4);
   uint32_t chunkSize = 36 + dataSize;
   file.write((const uint8_t*)&chunkSize, 4);
   file.write((const uint8_t*)"WAVE", 4);
 
-  // fmt sub-chunk
   file.write((const uint8_t*)"fmt ", 4);
-  uint32_t subchunk1Size = 16;                  // PCM
+  uint32_t subchunk1Size = 16;
   file.write((const uint8_t*)&subchunk1Size, 4);
-  uint16_t audioFormat = 1;                     // PCM = 1
+  uint16_t audioFormat = 1;
   file.write((const uint8_t*)&audioFormat, 2);
   uint16_t numChannels = CHANNELS;
   file.write((const uint8_t*)&numChannels, 2);
@@ -539,7 +584,6 @@ void writeWavHeader(File &file, uint32_t dataSize) {
   uint16_t bitsPerSample = BITS_PER_SAMPLE;
   file.write((const uint8_t*)&bitsPerSample, 2);
 
-  // data sub-chunk
   file.write((const uint8_t*)"data", 4);
   file.write((const uint8_t*)&dataSize, 4);
 }
@@ -548,19 +592,12 @@ void writeWavHeader(File &file, uint32_t dataSize) {
 //  FILENAME INDEX GENERATOR
 // =============================================================================
 
-/**
- * Finds the next available memory index where the folder /memory_NNN/
- * does not yet exist on the SD card. This ensures each memory gets
- * its own unique folder and nothing is overwritten.
- */
 int findNextMemoryIndex() {
   char folderPath[32];
-
   do {
     memoryIndex++;
     snprintf(folderPath, sizeof(folderPath), "/memory_%03d", memoryIndex);
   } while (SD.exists(folderPath));
-
   return memoryIndex;
 }
 
@@ -568,45 +605,515 @@ int findNextMemoryIndex() {
 //  VIBRATION MOTOR
 // =============================================================================
 
-/**
- * Configures the vibration motor pin using LEDC PWM.
- * Uses a dedicated LEDC channel to avoid conflicts with the camera.
- */
 void initVibrationMotor() {
   Serial.println("Initializing vibration motor...");
   ledcSetup(VIBRATION_PWM_CHANNEL, VIBRATION_PWM_FREQ, VIBRATION_PWM_RES);
   ledcAttachPin(VIBRATION_MOTOR_PIN, VIBRATION_PWM_CHANNEL);
-  ledcWrite(VIBRATION_PWM_CHANNEL, 0);  // Start with motor off
+  ledcWrite(VIBRATION_PWM_CHANNEL, 0);
   Serial.println("Vibration motor ready.");
 }
 
-/**
- * Single vibration pulse at the configured intensity.
- * @param durationMs  How long the motor stays on (milliseconds).
- */
 void vibrateOnce(unsigned long durationMs) {
   ledcWrite(VIBRATION_PWM_CHANNEL, vibrationIntensity);
   delay(durationMs);
   ledcWrite(VIBRATION_PWM_CHANNEL, 0);
 }
 
-/**
- * Multiple vibration pulses with configurable on/off timing.
- * @param pulses  Number of vibration pulses.
- * @param onMs    Duration of each pulse (milliseconds).
- * @param offMs   Pause between pulses (milliseconds).
- *
- * Patterns used in this project:
- *   Start memory : vibratePattern(2, 80, 80)  → buzz-buzz  (double tap)
- *   Stop memory  : vibrateOnce(300)            → buuuzz     (one long pulse)
- */
 void vibratePattern(int pulses, unsigned long onMs, unsigned long offMs) {
   for (int i = 0; i < pulses; i++) {
     ledcWrite(VIBRATION_PWM_CHANNEL, vibrationIntensity);
     delay(onMs);
     ledcWrite(VIBRATION_PWM_CHANNEL, 0);
-    if (i < pulses - 1) {
-      delay(offMs);  // Pause between pulses (skip after last pulse)
-    }
+    if (i < pulses - 1) delay(offMs);
   }
+}
+
+// =============================================================================
+//  WEB SERVER — HTML PAGE
+// =============================================================================
+
+/**
+ * Serves the main web UI — a beautiful, mobile-friendly dark-themed page
+ * that lists all memories with photo previews and audio players.
+ */
+void handleRoot() {
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>XIAO Memory Browser</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0a0a0f;
+      color: #e0e0e0;
+      min-height: 100vh;
+    }
+
+    header {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      padding: 20px;
+      text-align: center;
+      border-bottom: 1px solid #2a2a4a;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    header h1 {
+      font-size: 1.4em;
+      font-weight: 600;
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 4px;
+    }
+
+    header p {
+      font-size: 0.8em;
+      color: #888;
+    }
+
+    .status-bar {
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      margin-top: 10px;
+      font-size: 0.75em;
+    }
+
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 4px;
+    }
+
+    .dot-green { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+    .dot-red   { background: #f87171; box-shadow: 0 0 6px #f87171; }
+
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: #666;
+    }
+
+    .empty-state .icon { font-size: 3em; margin-bottom: 12px; }
+
+    .memory-card {
+      background: linear-gradient(145deg, #151520, #1a1a2e);
+      border: 1px solid #2a2a4a;
+      border-radius: 16px;
+      margin-bottom: 16px;
+      overflow: hidden;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .memory-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(102, 126, 234, 0.15);
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid #2a2a4a;
+    }
+
+    .card-title {
+      font-weight: 600;
+      font-size: 0.95em;
+      color: #b8b8d0;
+    }
+
+    .card-title span {
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .delete-btn {
+      background: none;
+      border: 1px solid #3a2020;
+      color: #f87171;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 0.75em;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .delete-btn:hover { background: #3a2020; }
+
+    .card-photo {
+      width: 100%;
+      aspect-ratio: 4/3;
+      object-fit: cover;
+      display: block;
+      background: #111;
+      cursor: pointer;
+    }
+
+    .card-audio {
+      padding: 12px 16px;
+      border-top: 1px solid #2a2a4a;
+    }
+
+    .card-audio audio {
+      width: 100%;
+      height: 36px;
+      border-radius: 8px;
+    }
+
+    .card-actions {
+      display: flex;
+      gap: 8px;
+      padding: 10px 16px;
+      border-top: 1px solid #2a2a4a;
+    }
+
+    .dl-btn {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px;
+      border-radius: 8px;
+      border: 1px solid #2a2a4a;
+      background: #151520;
+      color: #b8b8d0;
+      text-decoration: none;
+      font-size: 0.8em;
+      transition: all 0.2s;
+    }
+
+    .dl-btn:hover {
+      background: #1a1a2e;
+      border-color: #667eea;
+      color: #667eea;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #666;
+    }
+
+    .spinner {
+      width: 32px; height: 32px;
+      border: 3px solid #2a2a4a;
+      border-top-color: #667eea;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 12px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Lightbox */
+    .lightbox {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.92);
+      z-index: 200;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .lightbox.active { display: flex; }
+
+    .lightbox img {
+      max-width: 95%;
+      max-height: 90vh;
+      border-radius: 8px;
+    }
+
+    .lightbox-close {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      background: rgba(255,255,255,0.1);
+      border: none;
+      color: white;
+      width: 40px; height: 40px;
+      border-radius: 50%;
+      font-size: 1.2em;
+      cursor: pointer;
+    }
+
+    .rec-badge {
+      display: inline-block;
+      background: #f87171;
+      color: white;
+      font-size: 0.65em;
+      padding: 2px 8px;
+      border-radius: 10px;
+      animation: pulse 1.5s infinite;
+      margin-left: 8px;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📷 XIAO Memory Browser</h1>
+    <p>Seeed Studio XIAO ESP32S3 Sense</p>
+    <div class="status-bar">
+      <span><span class="status-dot dot-green"></span> Connected</span>
+      <span id="memCount">— memories</span>
+    </div>
+  </header>
+
+  <div class="container" id="app">
+    <div class="loading">
+      <div class="spinner"></div>
+      <p>Loading memories...</p>
+    </div>
+  </div>
+
+  <div class="lightbox" id="lightbox" onclick="closeLightbox()">
+    <button class="lightbox-close" onclick="closeLightbox()">✕</button>
+    <img id="lightbox-img" src="" alt="Photo">
+  </div>
+
+  <script>
+    async function loadMemories() {
+      try {
+        const res = await fetch('/api/list');
+        const data = await res.json();
+        const app = document.getElementById('app');
+        const memCount = document.getElementById('memCount');
+
+        if (data.memories.length === 0) {
+          app.innerHTML = `
+            <div class="empty-state">
+              <div class="icon">📭</div>
+              <p>No memories yet</p>
+              <p style="margin-top:8px;font-size:0.85em">Touch the sensor to create your first memory</p>
+            </div>`;
+          memCount.textContent = '0 memories';
+          return;
+        }
+
+        memCount.textContent = data.memories.length + ' memories';
+
+        let html = '';
+        data.memories.forEach(m => {
+          const photoUrl = '/file?path=' + encodeURIComponent(m.photo);
+          const audioUrl = '/file?path=' + encodeURIComponent(m.audio);
+
+          html += `
+          <div class="memory-card" id="card-${m.name}">
+            <div class="card-header">
+              <div class="card-title">🧠 <span>${m.name}</span></div>
+              <button class="delete-btn" onclick="deleteMemory('${m.name}')">🗑 Delete</button>
+            </div>
+            ${m.hasPhoto ? `<img class="card-photo" src="${photoUrl}" alt="Photo" loading="lazy" onclick="openLightbox('${photoUrl}')">` : ''}
+            ${m.hasAudio ? `
+            <div class="card-audio">
+              <audio controls preload="none">
+                <source src="${audioUrl}" type="audio/wav">
+              </audio>
+            </div>` : ''}
+            <div class="card-actions">
+              ${m.hasPhoto ? `<a class="dl-btn" href="${photoUrl}" download="${m.name}_photo.jpg">📷 Download Photo</a>` : ''}
+              ${m.hasAudio ? `<a class="dl-btn" href="${audioUrl}" download="${m.name}_audio.wav">🎙 Download Audio</a>` : ''}
+            </div>
+          </div>`;
+        });
+        app.innerHTML = html;
+
+      } catch (err) {
+        document.getElementById('app').innerHTML =
+          '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load</p></div>';
+      }
+    }
+
+    async function deleteMemory(name) {
+      if (!confirm('Delete ' + name + '? This cannot be undone.')) return;
+      try {
+        const res = await fetch('/api/delete?name=' + encodeURIComponent(name));
+        if (res.ok) {
+          document.getElementById('card-' + name).remove();
+          // Update count
+          const cards = document.querySelectorAll('.memory-card');
+          document.getElementById('memCount').textContent = cards.length + ' memories';
+          if (cards.length === 0) loadMemories();
+        }
+      } catch (e) { alert('Delete failed'); }
+    }
+
+    function openLightbox(url) {
+      document.getElementById('lightbox-img').src = url;
+      document.getElementById('lightbox').classList.add('active');
+    }
+
+    function closeLightbox() {
+      document.getElementById('lightbox').classList.remove('active');
+    }
+
+    loadMemories();
+  </script>
+</body>
+</html>
+)rawliteral";
+
+  server.send(200, "text/html", html);
+}
+
+// =============================================================================
+//  WEB SERVER — LIST MEMORIES API
+// =============================================================================
+
+/**
+ * Returns a JSON array of all memory folders with their contents.
+ * Example: {"memories":[{"name":"memory_001","photo":"/memory_001/photo.jpg",
+ *           "audio":"/memory_001/audio.wav","hasPhoto":true,"hasAudio":true}]}
+ */
+void handleListMemories() {
+  if (!sdReady) {
+    server.send(500, "application/json", "{\"error\":\"SD card not available\"}");
+    return;
+  }
+
+  String json = "{\"memories\":[";
+  File root = SD.open("/");
+  bool first = true;
+
+  if (root && root.isDirectory()) {
+    File entry = root.openNextFile();
+    while (entry) {
+      String name = entry.name();
+      // Only include memory_xxx directories
+      if (entry.isDirectory() && name.startsWith("memory_")) {
+        if (!first) json += ",";
+        first = false;
+
+        String photoPath = "/" + name + "/photo.jpg";
+        String audioPath = "/" + name + "/audio.wav";
+        bool hasPhoto = SD.exists(photoPath);
+        bool hasAudio = SD.exists(audioPath);
+
+        json += "{\"name\":\"" + name + "\"";
+        json += ",\"photo\":\"" + photoPath + "\"";
+        json += ",\"audio\":\"" + audioPath + "\"";
+        json += ",\"hasPhoto\":" + String(hasPhoto ? "true" : "false");
+        json += ",\"hasAudio\":" + String(hasAudio ? "true" : "false");
+        json += "}";
+      }
+      entry.close();
+      entry = root.openNextFile();
+    }
+    root.close();
+  }
+
+  json += "]}";
+  server.send(200, "application/json", json);
+}
+
+// =============================================================================
+//  WEB SERVER — SERVE FILE
+// =============================================================================
+
+/**
+ * Streams a file from the SD card to the browser.
+ * Usage: /file?path=/memory_001/photo.jpg
+ */
+void handleFile() {
+  if (!server.hasArg("path")) {
+    server.send(400, "text/plain", "Missing 'path' parameter");
+    return;
+  }
+
+  String path = server.arg("path");
+  if (!SD.exists(path)) {
+    server.send(404, "text/plain", "File not found: " + path);
+    return;
+  }
+
+  File file = SD.open(path, FILE_READ);
+  if (!file) {
+    server.send(500, "text/plain", "Cannot open file");
+    return;
+  }
+
+  // Determine content type from extension
+  String contentType = "application/octet-stream";
+  if (path.endsWith(".jpg") || path.endsWith(".jpeg")) {
+    contentType = "image/jpeg";
+  } else if (path.endsWith(".wav")) {
+    contentType = "audio/wav";
+  } else if (path.endsWith(".png")) {
+    contentType = "image/png";
+  }
+
+  // Stream the file to the client
+  server.streamFile(file, contentType);
+  file.close();
+}
+
+// =============================================================================
+//  WEB SERVER — DELETE MEMORY
+// =============================================================================
+
+/**
+ * Deletes a memory folder and all its contents.
+ * Usage: /api/delete?name=memory_001
+ */
+void handleDelete() {
+  if (!server.hasArg("name")) {
+    server.send(400, "text/plain", "Missing 'name' parameter");
+    return;
+  }
+
+  String name = server.arg("name");
+  String folderPath = "/" + name;
+
+  // Safety check: only allow deleting memory_xxx folders
+  if (!name.startsWith("memory_")) {
+    server.send(403, "text/plain", "Can only delete memory folders");
+    return;
+  }
+
+  if (!SD.exists(folderPath)) {
+    server.send(404, "text/plain", "Folder not found");
+    return;
+  }
+
+  // Delete files inside the folder first
+  File dir = SD.open(folderPath);
+  if (dir && dir.isDirectory()) {
+    File f = dir.openNextFile();
+    while (f) {
+      String filePath = folderPath + "/" + String(f.name());
+      f.close();
+      SD.remove(filePath);
+      f = dir.openNextFile();
+    }
+    dir.close();
+  }
+
+  // Remove the empty folder
+  SD.rmdir(folderPath);
+
+  Serial.printf("[Web] Deleted: %s\n", folderPath.c_str());
+  server.send(200, "application/json", "{\"ok\":true}");
 }

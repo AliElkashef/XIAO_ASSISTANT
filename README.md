@@ -1,6 +1,6 @@
-# XIAO ESP32S3 Sense — Memory Recorder
+# XIAO ESP32S3 Sense — Memory Recorder + WiFi Browser
 
-A simple Arduino project for the **Seeed Studio XIAO ESP32S3 Sense** that records "Memories" — a **photo + audio recording** saved together with a single touch.
+A simple Arduino project for the **Seeed Studio XIAO ESP32S3 Sense** that records "Memories" — a **photo + audio recording** saved together with a single touch — and lets you **browse them from your phone** via WiFi.
 
 ---
 
@@ -24,13 +24,35 @@ Each Memory is saved in its own folder:
 
 ---
 
+## WiFi File Browser 📱
+
+The device creates a **WiFi hotspot**. Connect from your phone or laptop to browse, view, and download all saved memories.
+
+| Setting | Value |
+|---|---|
+| SSID | `XIAO_Memory` |
+| Password | `12345678` |
+| URL | `http://192.168.4.1` |
+
+### Web UI Features
+- 🌙 Dark theme, mobile-friendly design
+- 🖼️ Photo preview with full-screen lightbox
+- 🔊 Built-in audio player
+- ⬇️ Download buttons for photo and audio
+- 🗑️ Delete memories from the browser
+- 📊 Memory count display
+
+---
+
 ## Features
 
 - **One-button operation** — single touch pin does everything
+- **WiFi Access Point** — browse files from any device
 - Sequential filenames — never overwrites existing files
 - Proper WAV header for playback compatibility
 - Haptic feedback with distinct vibration patterns
 - Configurable vibration intensity via a single variable
+- Auto-stop recording after 60 seconds
 - Graceful error handling if any peripheral fails
 
 ---
@@ -46,6 +68,8 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 | `FS.h` | Filesystem abstraction |
 | `SD.h` | SD card access (SPI mode) |
 | `SPI.h` | SPI bus |
+| `WiFi.h` | WiFi Access Point |
+| `WebServer.h` | HTTP web server |
 
 ---
 
@@ -117,21 +141,23 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 
 | Function | Description |
 |---|---|
-| `setup()` | Initialises all peripherals and prints status summary. |
-| `loop()` | Streams audio while recording; polls touch button when idle. |
-| `initSDCard()` | Mounts the SD card via SPI. Returns `true` on success. |
-| `initCamera()` | Configures and starts the OV2640 camera. Returns `true` on success. |
-| `initMicrophone()` | Installs the I2S driver in PDM-RX mode. Returns `true` on success. |
-| `initVibrationMotor()` | Configures GPIO 3 with LEDC PWM for motor control. |
-| `isTouched(pin)` | Reads capacitive touch value, applies debounce, waits for release. |
-| `startMemory()` | Captures photo, opens WAV file, starts recording, vibrates (buzz-buzz). |
-| `stopMemory()` | Patches WAV header, closes file, vibrates (buuuzz), prints summary. |
-| `recordAudioChunk()` | Reads one I2S buffer and writes it to the open WAV file. |
-| `savePhoto(path)` | Captures JPEG frame and writes to SD. Returns `true` on success. |
-| `writeWavHeader(file, dataSize)` | Writes a standard 44-byte RIFF/WAV header for 16-bit mono PCM. |
-| `findNextMemoryIndex()` | Finds next index where neither .jpg nor .wav exists on SD. |
-| `vibrateOnce(durationMs)` | Single vibration pulse at configured intensity. |
-| `vibratePattern(pulses, onMs, offMs)` | Multiple vibration pulses with configurable timing. |
+| `setup()` | Initialises all peripherals, WiFi AP, and web server. |
+| `loop()` | Handles web requests, streams audio while recording, polls touch. |
+| `initSDCard()` | Mounts the SD card via SPI. |
+| `initCamera()` | Configures and starts the OV2640 camera. |
+| `initMicrophone()` | Installs the I2S driver in PDM-RX mode. |
+| `initVibrationMotor()` | Configures GPIO 3 with LEDC PWM. |
+| `initWiFiAP()` | Creates a WiFi Access Point hotspot. |
+| `setupWebServer()` | Registers URL routes and starts the HTTP server. |
+| `startMemory()` | Creates folder, captures photo, starts audio recording. |
+| `stopMemory()` | Patches WAV header, closes file, vibrates. |
+| `recordAudioChunk()` | Reads one I2S buffer and writes to WAV file. |
+| `findNextMemoryIndex()` | Finds next unused folder index on SD. |
+| `savePhoto(path)` | Captures JPEG and writes to SD. |
+| `handleRoot()` | Serves the main HTML/CSS/JS web UI page. |
+| `handleListMemories()` | Returns JSON list of all memory folders. |
+| `handleFile()` | Streams a file from SD card to the browser. |
+| `handleDelete()` | Deletes a memory folder and its contents. |
 
 ---
 
@@ -164,7 +190,7 @@ Adjust `vibrationIntensity` at the top of the sketch:
 | Channels | 1 (Mono) |
 | Format | PCM (uncompressed) |
 | Container | WAV (RIFF) |
-| Duration | Variable (touch to start, touch again to stop) |
+| Duration | Variable (max 60 seconds) |
 | File Size | ~32 KB per second of recording |
 
 ---
@@ -201,6 +227,8 @@ The default threshold is `40000`. To calibrate for your setup:
 | Touch triggers immediately | Calibrate `TOUCH_THRESHOLD` (see above) |
 | Audio sounds like static | Verify PDM mode is enabled (`I2S_MODE_PDM`) |
 | Board not detected | Hold BOOT button while connecting USB |
+| Can't connect to WiFi | Look for `XIAO_Memory` in WiFi list, password: `12345678` |
+| Web page not loading | Make sure you're connected to the XIAO WiFi, open `http://192.168.4.1` |
 
 ---
 

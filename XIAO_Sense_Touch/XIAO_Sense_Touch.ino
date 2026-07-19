@@ -1,51 +1,53 @@
 /*
  * =============================================================================
- *  XIAO ESP32S3 Sense — Memory Recorder (Photo + Audio) + WiFi File Browser
+ *  XIAO ESP32S3 Sense — Memory Recorder (Event-Driven Deep Sleep)
  * =============================================================================
  *
  *  Board  : Seeed Studio XIAO ESP32S3 Sense
  *  IDE    : Arduino IDE 2.x+
  *
- *  Concept
- *  -------
- *  A "Memory" is a photo + audio recording saved together.
+ *  Architecture
+ *  ------------
+ *  The device stays in DEEP SLEEP most of the time (~10 µA).
+ *  It wakes ONLY when the user touches the capacitive touch sensor.
  *
- *  • First touch  (GPIO 1 / D0) → Capture photo + Start audio recording
- *  • Second touch (GPIO 1 / D0) → Stop audio recording
+ *  Two operating modes are determined by touch duration after wakeup:
+ *
+ *  Mode 1 — SHORT TOUCH → Capture Memory
+ *    Wake → Photo + Audio → Save to SD → Sleep
+ *
+ *  Mode 2 — LONG TOUCH → Web Server
+ *    Wake → Start WiFi AP + Web UI → Browse files → Idle timeout → Sleep
  *
  *  Files are saved in folders:
  *    /memory_001/photo.jpg  +  /memory_001/audio.wav
  *    /memory_002/photo.jpg  +  /memory_002/audio.wav
  *
- *  WiFi Access Point
- *  -----------------
- *  The device creates a WiFi hotspot. Connect from your phone/laptop
- *  to browse, view, and download all saved memories.
- *
+ *  WiFi Access Point (Mode 2 only)
+ *  --------------------------------
  *    SSID     : XIAO_Memory
  *    Password : 12345678
  *    URL      : http://192.168.4.1
  *
- *  Haptic feedback (vibration motor on GPIO 3 / D2):
- *    Start memory : buzz-buzz  (two short pulses)
- *    Stop memory  : buuuzz     (one long pulse)
+ *  Haptic Feedback (vibration motor on GPIO 3 / D2):
+ *    Wakeup confirm     : buzz             (one short pulse)
+ *    Memory started     : buzz-buzz        (two short pulses)
+ *    Memory saved       : buuuzz           (one long pulse)
+ *    Web server started : buzz-buzz-buzz   (three short pulses)
+ *    Going to sleep     : bz-bz-bz        (three quick pulses)
  *
- *  Libraries used (all built-in with the ESP32-S3 board package)
- *  ---------------------------------------------------------------
- *  - esp_camera.h    — camera driver
- *  - driver/i2s.h    — I2S / PDM microphone driver
- *  - FS.h / SD.h     — file system & SD card (SPI mode)
- *  - SPI.h           — SPI bus for SD card
- *  - WiFi.h          — WiFi Access Point
- *  - WebServer.h     — HTTP web server
+ *  Libraries (all built-in with the ESP32-S3 board package)
+ *  ---------------------------------------------------------
+ *  - esp_camera.h / driver/i2s.h / FS.h / SD.h / SPI.h
+ *  - WiFi.h / WebServer.h / esp_sleep.h
  *
- *  Board settings in Arduino IDE
- *  ------------------------------
+ *  Board Settings
+ *  ---------------
  *  Board        : "XIAO_ESP32S3"
  *  PSRAM        : "OPI PSRAM"          ← required for camera
+ *  USB CDC      : Enabled              ← required for Serial
  *  Flash Mode   : "QIO 80 MHz"
  *  Upload Speed : 921600
- *  Partition    : "Default 4MB with spiffs (1.2MB APP / 1.5MB SPIFFS)"
  *
  *  SD card must be formatted FAT32 (≤ 32 GB recommended).
  * =============================================================================
@@ -69,13 +71,13 @@ const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 
 // ─── Pin Definitions ─────────────────────────────────────────────────────────
 
-// Touch button (ESP32-S3 capacitive touch) — single button for memory
-#define TOUCH_BUTTON_MEMORY   1   // GPIO 1  (D0) — start/stop memory
+// Touch button (ESP32-S3 capacitive touch)
+#define TOUCH_BUTTON_MEMORY   1   // GPIO 1  (D0) — single button
 
-// Vibration motor (connected via transistor/MOSFET to this pin)
-#define VIBRATION_MOTOR_PIN   3   // GPIO 3  (D2) — vibration motor
+// Vibration motor (connected via transistor/MOSFET)
+#define VIBRATION_MOTOR_PIN   3   // GPIO 3  (D2)
 #define VIBRATION_PWM_CHANNEL 2   // LEDC channel (0 & 1 used by camera)
-#define VIBRATION_PWM_FREQ    1000 // 1 kHz PWM frequency
+#define VIBRATION_PWM_FREQ    1000
 #define VIBRATION_PWM_RES     8   // 8-bit resolution (0–255)
 
 // SD card (SPI mode on Sense expansion board)
@@ -86,12 +88,12 @@ const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 #define MIC_CLK_PIN           42  // PDM clock
 #define MIC_DATA_PIN          41  // PDM data
 
-// Camera (OV2640 on Sense expansion board — directly wired via B2B connector)
-#define CAMERA_PWDN_PIN      -1   // Not used on XIAO
-#define CAMERA_RESET_PIN     -1   // Not used on XIAO
+// Camera (OV2640 on Sense expansion board)
+#define CAMERA_PWDN_PIN      -1
+#define CAMERA_RESET_PIN     -1
 #define CAMERA_XCLK_PIN      10
-#define CAMERA_SIOD_PIN      40   // I2C SDA
-#define CAMERA_SIOC_PIN      39   // I2C SCL
+#define CAMERA_SIOD_PIN      40
+#define CAMERA_SIOC_PIN      39
 #define CAMERA_Y9_PIN        48
 #define CAMERA_Y8_PIN        11
 #define CAMERA_Y7_PIN        12
@@ -114,197 +116,505 @@ const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 #define I2S_READ_BUF_SIZE     1024      // Bytes per I2S read chunk
 #define MAX_RECORD_SEC        60        // Auto-stop after this many seconds
 
-// ─── Sleep Mode Parameters ─────────────────────────────────────────────────
+// ─── Touch & Mode Detection Parameters ──────────────────────────────────────
 
-// How many seconds of inactivity before the device enters deep sleep.
-// Set to 0 to disable sleep mode entirely.
-#define SLEEP_TIMEOUT_SEC     120       // 2 minutes of inactivity→ sleep
+// On ESP32-S3, touchRead() values INCREASE when touched.
+#define TOUCH_THRESHOLD       22000     // Active-mode touch detection
+#define SLEEP_TOUCH_THRESHOLD 22000     // Deep sleep wakeup threshold
+#define DEBOUNCE_MS           300       // Debounce delay
 
-// Touch threshold for deep sleep wakeup (separate from normal threshold)
-#define SLEEP_TOUCH_THRESHOLD 22000
+// Touch hold duration to distinguish short vs long touch.
+// After wakeup, if the user holds for longer than this → Mode 2 (Web Server)
+#define LONG_TOUCH_MS         1000      // 1 second = long touch
+
+// ─── Web Server Timeout ──────────────────────────────────────────────────────
+
+// In Mode 2, how many seconds of no web activity (and no WiFi clients)
+// before the device returns to deep sleep.
+#define WEB_TIMEOUT_SEC       120       // 2 minutes
 
 // ─── Vibration Motor Parameters ──────────────────────────────────────────────
 
-// Vibration intensity: 0 (off) to 255 (max). Change this to adjust strength.
-// Suggested values:  64 = light,  128 = medium,  200 = strong,  255 = max
-static uint8_t vibrationIntensity = 200;   // ← DEFAULT: medium
+// Vibration intensity: 0 (off) to 255 (max).
+// Suggested: 64=light, 128=medium, 200=strong, 255=max
+static uint8_t vibrationIntensity = 200;
 
-// ─── Touch Sensor Parameters ─────────────────────────────────────────────────
+// ─── Touch Type Enum ─────────────────────────────────────────────────────────
 
-// On ESP32-S3, touchRead() values INCREASE when touched.
-// Adjust this threshold after checking Serial output during first boot.
-#define TOUCH_THRESHOLD       22000
-#define DEBOUNCE_MS           300       // Milliseconds between re-reads
+enum TouchType {
+  TOUCH_NONE,       // Cold boot or unknown wakeup
+  TOUCH_SHORT,      // Short touch → Mode 1 (Capture Memory)
+  TOUCH_LONG        // Long touch  → Mode 2 (Web Server)
+};
 
 // ─── Global State ────────────────────────────────────────────────────────────
 
-static int  memoryIndex     = 0;      // Next index for memory_NNN files
-static bool sdReady         = false;
-static bool cameraReady     = false;
-static bool micReady        = false;
-static bool isRecording     = false;  // True while a memory is being recorded
+// Persists across deep sleep cycles (stored in RTC slow memory)
+RTC_DATA_ATTR int memoryIndex = 0;
 
-// Recording state (used while isRecording == true)
-static File    recordFile;            // Open WAV file handle
-static uint32_t totalBytesWritten = 0;
-static unsigned long recordStartMs = 0;   // millis() when recording started
-static unsigned long lastActivityMs = 0;  // millis() of last user interaction
+// Runtime state
+static bool sdReady          = false;  // Needed by web handlers
+static bool webServerMode    = false;  // True only in Mode 2
+static unsigned long lastActivityMs = 0;
 
-// Web server instance
+// Web server instance (used only in Mode 2)
 WebServer server(80);
 
 // ─── Forward Declarations ────────────────────────────────────────────────────
 
+// Core architecture
+TouchType detectTouchType();
+void      captureMemory();
+void      startWebServerMode();
+void      checkWebTimeout();
+void      goToSleep();
+void      waitForSerial(unsigned long maxWaitMs);
+
+// Peripheral init (EXISTING — unchanged)
 bool   initSDCard();
 bool   initCamera();
 bool   initMicrophone();
 void   initVibrationMotor();
 void   initWiFiAP();
 void   setupWebServer();
-void   startMemory();
-void   stopMemory();
-void   recordAudioChunk();
-int    findNextMemoryIndex();
+
+// Peripheral deinit (NEW)
+void   deinitCamera();
+void   deinitMicrophone();
+
+// Memory capture helpers (EXISTING — unchanged)
 bool   savePhoto(const char* path);
+void   recordAudioChunk();
 void   writeWavHeader(File &file, uint32_t dataSize);
-bool   isTouched(int pin);
+int    findNextMemoryIndex();
+
+// Vibration (EXISTING — unchanged)
 void   vibrateOnce(unsigned long durationMs);
 void   vibratePattern(int pulses, unsigned long onMs, unsigned long offMs);
-void   resetActivityTimer();
-void   checkSleepTimeout();
-void   enterDeepSleep();
 
-// Web server handlers
+// Web server handlers (EXISTING — unchanged)
 void   handleRoot();
 void   handleListMemories();
 void   handleFile();
 void   handleDelete();
 
 // =============================================================================
-//  SETUP
+//  SETUP — Event-driven entry point
 // =============================================================================
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);  // Give Serial time to connect
+  waitForSerial(2000);
+
   Serial.println();
   Serial.println("==========================================");
   Serial.println("  XIAO ESP32S3 Sense — Memory Recorder");
+  Serial.println("       (Event-Driven Deep Sleep)");
   Serial.println("==========================================");
 
-  // Check if we woke up from deep sleep
-  esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
-  if (wakeupCause == ESP_SLEEP_WAKEUP_TOUCHPAD) {
-    Serial.println("🔔 Woke up from touch!");
-  } else if (wakeupCause != 0) {
-    Serial.printf("🔔 Woke up — cause: %d\n", wakeupCause);
-  }
-
-  // Initialise peripherals — each can fail independently
-  sdReady     = initSDCard();
-  cameraReady = initCamera();
-  micReady    = initMicrophone();
+  // Always init vibration motor first (needed for all modes)
   initVibrationMotor();
-  initWiFiAP();
-  setupWebServer();
 
-  // Start the activity timer
-  resetActivityTimer();
+  // Detect what kind of touch woke us up
+  TouchType touchType = detectTouchType();
 
-  Serial.println();
-  Serial.println("--- Status Summary ---");
-  Serial.printf("  SD Card   : %s\n", sdReady     ? "OK" : "FAIL");
-  Serial.printf("  Camera    : %s\n", cameraReady ? "OK" : "FAIL");
-  Serial.printf("  Microphone: %s\n", micReady    ? "OK" : "FAIL");
-  Serial.printf("  Vibration : intensity %d/255\n", vibrationIntensity);
-  Serial.printf("  WiFi AP   : %s\n", AP_SSID);
-  Serial.println("  Web UI    : http://192.168.4.1");
-  Serial.printf("  Sleep     : after %d sec inactivity\n", SLEEP_TIMEOUT_SEC);
-  Serial.println("----------------------");
-  Serial.println();
-  Serial.println("Touch GPIO1 → Start a new Memory (photo + audio)");
-  Serial.println("Touch GPIO1 again → Stop recording & save Memory");
-  Serial.println();
+  switch (touchType) {
 
-  // Short vibration to confirm we're awake
-  if (wakeupCause == ESP_SLEEP_WAKEUP_TOUCHPAD) {
-    vibrateOnce(100);
+    case TOUCH_SHORT:
+      // ── Mode 1: Capture Memory ──
+      Serial.println();
+      Serial.println(">>> MODE 1: Capture Memory (short touch)");
+      Serial.println();
+      vibrateOnce(100);      // Confirm wakeup
+      captureMemory();       // Full pipeline: init → capture → deinit
+      goToSleep();           // Sleep immediately after
+      break;
+
+    case TOUCH_LONG:
+      // ── Mode 2: Web Server ──
+      Serial.println();
+      Serial.println(">>> MODE 2: Web Server (long touch)");
+      Serial.println();
+      vibratePattern(3, 80, 80);  // Triple buzz = web mode
+      startWebServerMode();       // Init SD + WiFi + server
+      // Falls through to loop() which handles web requests
+      break;
+
+    default:
+      // Cold boot, reset, or unknown wakeup
+      Serial.println();
+      Serial.println("Cold boot — no touch detected.");
+      Serial.println("Going to sleep. Touch GPIO1 to wake.");
+      Serial.println();
+      vibrateOnce(50);
+      goToSleep();
+      break;
   }
 }
 
 // =============================================================================
-//  LOOP
+//  LOOP — Minimal (only runs in Mode 2)
 // =============================================================================
 
 void loop() {
-  // Always handle web server requests
-  server.handleClient();
-
-  // ── While recording: stream audio data and check for stop ──
-  if (isRecording) {
-    // Keep writing audio chunks to the SD card
-    recordAudioChunk();
-
-    // Auto-stop if max duration reached
-    if ((millis() - recordStartMs) >= (unsigned long)MAX_RECORD_SEC * 1000UL) {
-      Serial.println("[Auto] Max recording time reached.");
-      stopMemory();
-    }
-    // Check if user wants to stop manually
-    else if (isTouched(TOUCH_BUTTON_MEMORY)) {
-      stopMemory();
-    }
-    return;  // Don't check for new memory touch while recording
+  if (webServerMode) {
+    server.handleClient();
+    checkWebTimeout();
   }
-
-  // ── Idle: wait for touch to start a new Memory ──
-  if (isTouched(TOUCH_BUTTON_MEMORY)) {
-    Serial.println("[Touch] Detected — Starting new Memory...");
-    if (!sdReady) {
-      Serial.println("[Error] SD card not available.");
-    } else if (!cameraReady) {
-      Serial.println("[Error] Camera not available.");
-    } else if (!micReady) {
-      Serial.println("[Error] Microphone not available.");
-    } else {
-      startMemory();
-    }
-  }
-
-  // ── Check if we should go to sleep ──
-  checkSleepTimeout();
-
-  delay(50);  // Small delay to keep loop responsive without hammering CPU
+  // In all other cases, the device should have entered deep sleep
+  // from setup() and never reach here.
 }
 
 // =============================================================================
-//  TOUCH DETECTION  (with debounce)
+//  TOUCH TYPE DETECTION (after wakeup)
 // =============================================================================
 
 /**
- * Returns true once per touch event.
- * On ESP32-S3 the touch value rises when the pad is touched.
- * A simple re-read after DEBOUNCE_MS filters accidental triggers.
+ * After waking from deep sleep, the user's finger is still on the pad.
+ * We measure how long they hold it to decide the mode:
+ *
+ *   Released within LONG_TOUCH_MS  → SHORT_TOUCH (Mode 1)
+ *   Held longer than LONG_TOUCH_MS → LONG_TOUCH  (Mode 2)
+ *   Not a touch wakeup             → TOUCH_NONE
  */
-bool isTouched(int pin) {
-  uint32_t val = touchRead(pin);
-  if (val > TOUCH_THRESHOLD) {
-    delay(DEBOUNCE_MS);
-    val = touchRead(pin);
-    if (val > TOUCH_THRESHOLD) {
-      // Wait for release so one touch = one action
-      while (touchRead(pin) > TOUCH_THRESHOLD) {
+TouchType detectTouchType() {
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+
+  Serial.printf("  Wakeup cause: %d", cause);
+  if (cause == ESP_SLEEP_WAKEUP_TOUCHPAD) {
+    Serial.println(" (Touch)");
+  } else if (cause == 0) {
+    Serial.println(" (Power-on / Reset)");
+  } else {
+    Serial.printf(" (Other: %d)\n", cause);
+  }
+
+  // Only proceed if woken by touch
+  if (cause != ESP_SLEEP_WAKEUP_TOUCHPAD) {
+    return TOUCH_NONE;
+  }
+
+  // Small stabilization delay after wakeup
+  delay(50);
+
+  // Measure how long the user holds the touch after wakeup
+  unsigned long holdStart = millis();
+
+  while (touchRead(TOUCH_BUTTON_MEMORY) > TOUCH_THRESHOLD) {
+    // Still holding...
+    if ((millis() - holdStart) >= LONG_TOUCH_MS) {
+      Serial.println("  → LONG TOUCH detected (held > 1 sec)");
+      // Wait for release before continuing
+      while (touchRead(TOUCH_BUTTON_MEMORY) > TOUCH_THRESHOLD) {
         delay(50);
       }
-      resetActivityTimer();  // User is active
-      return true;
+      delay(DEBOUNCE_MS);
+      return TOUCH_LONG;
     }
+    delay(20);
   }
-  return false;
+
+  // Released before timeout → short touch
+  delay(DEBOUNCE_MS);
+  Serial.println("  → SHORT TOUCH detected (quick tap)");
+  return TOUCH_SHORT;
 }
 
 // =============================================================================
-//  SD CARD INITIALISATION
+//  SERIAL WAIT (safe for USB CDC)
+// =============================================================================
+
+/**
+ * Waits for USB CDC Serial to reconnect after deep sleep wakeup.
+ * Times out to avoid hanging if no USB host is connected.
+ */
+void waitForSerial(unsigned long maxWaitMs) {
+  unsigned long start = millis();
+  while (!Serial && (millis() - start < maxWaitMs)) {
+    delay(10);
+  }
+  delay(300);  // Extra settle time for USB host
+}
+
+// =============================================================================
+//  MODE 1: CAPTURE MEMORY (self-contained pipeline)
+// =============================================================================
+
+/**
+ * Complete memory capture pipeline:
+ *   Init SD → Init Camera → Photo → Deinit Camera
+ *   → Init Mic → Record (blocking) → Stop → Deinit Mic → Close SD
+ *
+ * The camera is deinitialized before recording to free ~400KB PSRAM.
+ * Audio recording is a blocking loop that exits on touch or timeout.
+ */
+void captureMemory() {
+  // ── Step 1: Init SD card ──
+  sdReady = initSDCard();
+  if (!sdReady) {
+    Serial.println("[Error] SD card not available — aborting.");
+    return;
+  }
+
+  // ── Step 2: Init Camera ──
+  bool cameraReady = initCamera();
+  if (!cameraReady) {
+    Serial.println("[Error] Camera not available — aborting.");
+    SD.end();
+    return;
+  }
+
+  // ── Step 3: Find next memory index and create folder ──
+  int idx = findNextMemoryIndex();
+
+  char folderPath[32];
+  char jpgPath[48];
+  char wavPath[48];
+  snprintf(folderPath, sizeof(folderPath), "/memory_%03d", idx);
+  snprintf(jpgPath,    sizeof(jpgPath),    "/memory_%03d/photo.jpg", idx);
+  snprintf(wavPath,    sizeof(wavPath),    "/memory_%03d/audio.wav", idx);
+
+  Serial.println("────────────────────────────────");
+  Serial.printf("  Memory #%03d — Starting\n", idx);
+  Serial.println("────────────────────────────────");
+
+  if (!SD.mkdir(folderPath)) {
+    Serial.printf("[Error] Could not create folder %s — aborting.\n", folderPath);
+    deinitCamera();
+    SD.end();
+    return;
+  }
+  Serial.printf("  📁 Folder created: %s\n", folderPath);
+
+  // ── Step 4: Capture photo ──
+  Serial.printf("  📷 Capturing photo → %s\n", jpgPath);
+  if (!savePhoto(jpgPath)) {
+    Serial.println("[Error] Photo capture failed — aborting.");
+    deinitCamera();
+    SD.end();
+    return;
+  }
+
+  // ── Step 5: Deinit camera (free PSRAM before recording) ──
+  deinitCamera();
+
+  // ── Step 6: Init microphone ──
+  bool micReady = initMicrophone();
+  if (!micReady) {
+    Serial.println("[Error] Microphone not available — photo saved but no audio.");
+    SD.end();
+    return;
+  }
+
+  // ── Step 7: Open WAV file and start recording ──
+  Serial.printf("  🎙️ Recording audio → %s\n", wavPath);
+  File recordFile = SD.open(wavPath, FILE_WRITE);
+  if (!recordFile) {
+    Serial.println("[Error] Could not create WAV file — aborting.");
+    deinitMicrophone();
+    SD.end();
+    return;
+  }
+
+  // Write placeholder WAV header (patched later)
+  writeWavHeader(recordFile, 0);
+  uint32_t totalBytesWritten = 0;
+  unsigned long recordStartMs = millis();
+
+  // Haptic feedback: memory capture started
+  vibratePattern(2, 80, 80);
+
+  Serial.println("  ⏺ Recording... Touch again to stop.");
+  Serial.println("────────────────────────────────");
+
+  // ── Step 8: Blocking recording loop ──
+  bool recording = true;
+  while (recording) {
+    // Read audio chunk and write to SD
+    uint8_t buffer[I2S_READ_BUF_SIZE];
+    size_t bytesRead = 0;
+    esp_err_t result = i2s_read(MIC_I2S_PORT, buffer, I2S_READ_BUF_SIZE,
+                                &bytesRead, portMAX_DELAY);
+    if (result == ESP_OK && bytesRead > 0) {
+      recordFile.write(buffer, bytesRead);
+      totalBytesWritten += bytesRead;
+    }
+
+    // Check for stop: user touches the sensor again
+    if (touchRead(TOUCH_BUTTON_MEMORY) > TOUCH_THRESHOLD) {
+      delay(DEBOUNCE_MS);
+      if (touchRead(TOUCH_BUTTON_MEMORY) > TOUCH_THRESHOLD) {
+        Serial.println("  [Touch] Stop recording.");
+        // Wait for release
+        while (touchRead(TOUCH_BUTTON_MEMORY) > TOUCH_THRESHOLD) {
+          delay(50);
+        }
+        recording = false;
+      }
+    }
+
+    // Check for auto-stop: max duration
+    if ((millis() - recordStartMs) >= (unsigned long)MAX_RECORD_SEC * 1000UL) {
+      Serial.println("  [Auto] Max recording time reached.");
+      recording = false;
+    }
+  }
+
+  // ── Step 9: Finalize WAV file ──
+  recordFile.seek(0);
+  writeWavHeader(recordFile, totalBytesWritten);
+  recordFile.close();
+
+  float durationSec = (float)totalBytesWritten
+                      / (SAMPLE_RATE * CHANNELS * (BITS_PER_SAMPLE / 8));
+
+  Serial.println("────────────────────────────────");
+  Serial.println("  ✅ Memory Saved!");
+  Serial.printf("  Audio duration: %.1f seconds\n", durationSec);
+  Serial.printf("  Audio size: %u bytes\n", totalBytesWritten + 44);
+  Serial.println("────────────────────────────────");
+  Serial.println();
+
+  // ── Step 10: Cleanup ──
+  deinitMicrophone();
+  SD.end();
+
+  // Haptic feedback: memory saved
+  vibrateOnce(300);
+}
+
+// =============================================================================
+//  MODE 2: WEB SERVER MODE
+// =============================================================================
+
+/**
+ * Initializes SD + WiFi + Web Server for file browsing.
+ * Sets webServerMode = true so loop() handles requests.
+ * The device stays awake until the inactivity timeout triggers.
+ */
+void startWebServerMode() {
+  // Init SD card (needed for file serving)
+  sdReady = initSDCard();
+  if (!sdReady) {
+    Serial.println("[Error] SD card not available — cannot serve files.");
+    Serial.println("Going to sleep.");
+    goToSleep();
+    return;
+  }
+
+  // Start WiFi Access Point
+  initWiFiAP();
+
+  // Start web server
+  setupWebServer();
+
+  // Start inactivity timer
+  lastActivityMs = millis();
+  webServerMode = true;
+
+  Serial.println();
+  Serial.println("--- Web Server Active ---");
+  Serial.printf("  SSID     : %s\n", AP_SSID);
+  Serial.println("  Password : 12345678");
+  Serial.println("  URL      : http://192.168.4.1");
+  Serial.printf("  Timeout  : %d sec inactivity\n", WEB_TIMEOUT_SEC);
+  Serial.println("-------------------------");
+  Serial.println();
+}
+
+// =============================================================================
+//  WEB SERVER TIMEOUT CHECK (runs in loop during Mode 2)
+// =============================================================================
+
+/**
+ * Checks if the web server should shut down due to inactivity.
+ * Won't sleep if a WiFi client is still connected.
+ */
+void checkWebTimeout() {
+  // Don't sleep if a WiFi client is connected
+  if (WiFi.softAPgetStationNum() > 0) {
+    lastActivityMs = millis();  // Client present = active
+    return;
+  }
+
+  // Check if timeout has been reached
+  unsigned long elapsed = millis() - lastActivityMs;
+  if (elapsed >= (unsigned long)WEB_TIMEOUT_SEC * 1000UL) {
+    Serial.println();
+    Serial.println("[Timeout] No web activity — shutting down.");
+    webServerMode = false;
+    goToSleep();
+  }
+}
+
+// =============================================================================
+//  GO TO SLEEP (clean shutdown + deep sleep)
+// =============================================================================
+
+/**
+ * Cleanly shuts down all peripherals and enters deep sleep.
+ * Configures touch pin as the wakeup source.
+ * On wake, the device reboots and runs setup() again.
+ */
+void goToSleep() {
+  Serial.println();
+  Serial.println("💤 Entering deep sleep...");
+  Serial.println("   Touch GPIO1 to wake up.");
+  Serial.println();
+
+  // Flush serial before sleeping (safe check for USB CDC)
+  if (Serial) {
+    Serial.flush();
+  }
+  delay(100);
+
+  // Vibrate: going to sleep
+  vibratePattern(3, 50, 50);
+  delay(200);
+
+  // Stop web server if running
+  if (webServerMode) {
+    server.stop();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    webServerMode = false;
+  }
+
+  // Close SD card if mounted
+  SD.end();
+
+  // Configure touch wakeup
+  touchSleepWakeUpEnable(TOUCH_BUTTON_MEMORY, SLEEP_TOUCH_THRESHOLD);
+
+  // Enter deep sleep (device reboots on wake)
+  esp_deep_sleep_start();
+
+  // Should never reach here
+  Serial.println("[ERROR] Deep sleep failed!");
+}
+
+// =============================================================================
+//  PERIPHERAL DEINITIALIZATION
+// =============================================================================
+
+/**
+ * Releases the camera driver and frees PSRAM frame buffers.
+ */
+void deinitCamera() {
+  esp_camera_deinit();
+  Serial.println("Camera deinitialized.");
+}
+
+/**
+ * Uninstalls the I2S driver to free resources.
+ */
+void deinitMicrophone() {
+  i2s_driver_uninstall(MIC_I2S_PORT);
+  Serial.println("Microphone deinitialized.");
+}
+
+// =============================================================================
+//  SD CARD INITIALISATION (existing — unchanged)
 // =============================================================================
 
 bool initSDCard() {
@@ -335,7 +645,7 @@ bool initSDCard() {
 }
 
 // =============================================================================
-//  CAMERA INITIALISATION
+//  CAMERA INITIALISATION (existing — unchanged)
 // =============================================================================
 
 bool initCamera() {
@@ -379,13 +689,12 @@ bool initCamera() {
 }
 
 // =============================================================================
-//  MICROPHONE INITIALISATION  (I2S / PDM)
+//  MICROPHONE INITIALISATION (existing — unchanged)
 // =============================================================================
 
 bool initMicrophone() {
   Serial.println("Initializing microphone...");
 
-  // I2S configuration for PDM microphone
   i2s_config_t i2s_config = {
     .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
     .sample_rate          = SAMPLE_RATE,
@@ -400,22 +709,19 @@ bool initMicrophone() {
     .fixed_mclk           = 0
   };
 
-  // Pin configuration
   i2s_pin_config_t pin_config = {
-    .bck_io_num   = I2S_PIN_NO_CHANGE,   // Not used in PDM mode
-    .ws_io_num    = MIC_CLK_PIN,          // GPIO 42 — PDM clock
-    .data_out_num = I2S_PIN_NO_CHANGE,    // Not used (RX only)
-    .data_in_num  = MIC_DATA_PIN          // GPIO 41 — PDM data
+    .bck_io_num   = I2S_PIN_NO_CHANGE,
+    .ws_io_num    = MIC_CLK_PIN,
+    .data_out_num = I2S_PIN_NO_CHANGE,
+    .data_in_num  = MIC_DATA_PIN
   };
 
-  // Install I2S driver
   esp_err_t err = i2s_driver_install(MIC_I2S_PORT, &i2s_config, 0, NULL);
   if (err != ESP_OK) {
     Serial.printf("[Error] I2S driver install failed: 0x%x\n", err);
     return false;
   }
 
-  // Set pins
   err = i2s_set_pin(MIC_I2S_PORT, &pin_config);
   if (err != ESP_OK) {
     Serial.printf("[Error] I2S set pin failed: 0x%x\n", err);
@@ -428,13 +734,9 @@ bool initMicrophone() {
 }
 
 // =============================================================================
-//  WiFi ACCESS POINT
+//  WiFi ACCESS POINT (existing — unchanged)
 // =============================================================================
 
-/**
- * Creates a WiFi hotspot so you can connect from a phone or laptop
- * to browse the saved memories via a web browser.
- */
 void initWiFiAP() {
   Serial.println("Starting WiFi Access Point...");
   WiFi.softAP(AP_SSID, AP_PASSWORD);
@@ -444,7 +746,7 @@ void initWiFiAP() {
 }
 
 // =============================================================================
-//  WEB SERVER SETUP
+//  WEB SERVER SETUP (existing — unchanged)
 // =============================================================================
 
 void setupWebServer() {
@@ -457,118 +759,7 @@ void setupWebServer() {
 }
 
 // =============================================================================
-//  MEMORY — START  (Photo + Audio Recording)
-// =============================================================================
-
-/**
- * Starts a new "Memory":
- *  1. Finds the next available index (e.g. 005)
- *  2. Creates a folder  → /memory_005/
- *  3. Captures a photo  → /memory_005/photo.jpg
- *  4. Opens a WAV file  → /memory_005/audio.wav  and starts recording
- *
- * If the photo fails, the memory is aborted (no audio file is created).
- */
-void startMemory() {
-  // Find next available index (folder doesn't exist yet)
-  int idx = findNextMemoryIndex();
-
-  // Build folder and file paths
-  char folderPath[32];
-  char jpgPath[48];
-  char wavPath[48];
-  snprintf(folderPath, sizeof(folderPath), "/memory_%03d", idx);
-  snprintf(jpgPath,    sizeof(jpgPath),    "/memory_%03d/photo.jpg", idx);
-  snprintf(wavPath,    sizeof(wavPath),    "/memory_%03d/audio.wav", idx);
-
-  Serial.println("────────────────────────────────");
-  Serial.printf("  Memory #%03d — Starting\n", idx);
-  Serial.println("────────────────────────────────");
-
-  // ── Step 1: Create folder ──
-  if (!SD.mkdir(folderPath)) {
-    Serial.printf("[Error] Could not create folder %s — Memory aborted.\n", folderPath);
-    return;
-  }
-  Serial.printf("  📁 Folder created: %s\n", folderPath);
-
-  // ── Step 2: Capture photo ──
-  Serial.printf("  📷 Capturing photo → %s\n", jpgPath);
-  if (!savePhoto(jpgPath)) {
-    Serial.println("[Error] Photo capture failed — Memory aborted.");
-    return;
-  }
-
-  // ── Step 3: Start audio recording ──
-  Serial.printf("  🎙️ Recording audio → %s\n", wavPath);
-  recordFile = SD.open(wavPath, FILE_WRITE);
-  if (!recordFile) {
-    Serial.println("[Error] Could not create WAV file — Memory aborted.");
-    return;
-  }
-
-  // Write a placeholder WAV header (44 bytes) — patched on stop
-  writeWavHeader(recordFile, 0);
-
-  totalBytesWritten = 0;
-  recordStartMs = millis();
-  isRecording = true;
-
-  // Haptic feedback: two short pulses = "memory started"
-  vibratePattern(2, 80, 80);
-
-  Serial.println("  Touch again to stop recording.");
-  Serial.println("────────────────────────────────");
-}
-
-// =============================================================================
-//  MEMORY — STOP  (Finalize Audio)
-// =============================================================================
-
-/**
- * Stops the audio recording, patches the WAV header, closes the file,
- * and prints a summary of the completed Memory.
- */
-void stopMemory() {
-  isRecording = false;
-
-  // Patch the WAV header with the real data size
-  recordFile.seek(0);
-  writeWavHeader(recordFile, totalBytesWritten);
-  recordFile.close();
-
-  // Haptic feedback: one long pulse = "memory saved"
-  vibrateOnce(300);
-
-  // Calculate duration for the user
-  float durationSec = (float)totalBytesWritten
-                      / (SAMPLE_RATE * CHANNELS * (BITS_PER_SAMPLE / 8));
-
-  Serial.println("────────────────────────────────");
-  Serial.println("  ✅ Memory Saved!");
-  Serial.printf("  Audio duration: %.1f seconds\n", durationSec);
-  Serial.printf("  Audio size: %u bytes\n", totalBytesWritten + 44);
-  Serial.println("────────────────────────────────\n");
-}
-
-// =============================================================================
-//  AUDIO CHUNK (called from loop while recording)
-// =============================================================================
-
-void recordAudioChunk() {
-  uint8_t buffer[I2S_READ_BUF_SIZE];
-  size_t bytesRead = 0;
-
-  esp_err_t result = i2s_read(MIC_I2S_PORT, buffer, I2S_READ_BUF_SIZE,
-                              &bytesRead, portMAX_DELAY);
-  if (result == ESP_OK && bytesRead > 0) {
-    recordFile.write(buffer, bytesRead);
-    totalBytesWritten += bytesRead;
-  }
-}
-
-// =============================================================================
-//  SAVE PHOTO
+//  SAVE PHOTO (existing — unchanged)
 // =============================================================================
 
 bool savePhoto(const char* path) {
@@ -593,7 +784,7 @@ bool savePhoto(const char* path) {
 }
 
 // =============================================================================
-//  WAV HEADER
+//  WAV HEADER (existing — unchanged)
 // =============================================================================
 
 void writeWavHeader(File &file, uint32_t dataSize) {
@@ -624,7 +815,7 @@ void writeWavHeader(File &file, uint32_t dataSize) {
 }
 
 // =============================================================================
-//  FILENAME INDEX GENERATOR
+//  FILENAME INDEX GENERATOR (existing — unchanged)
 // =============================================================================
 
 int findNextMemoryIndex() {
@@ -637,7 +828,7 @@ int findNextMemoryIndex() {
 }
 
 // =============================================================================
-//  VIBRATION MOTOR
+//  VIBRATION MOTOR (existing — unchanged)
 // =============================================================================
 
 void initVibrationMotor() {
@@ -664,85 +855,11 @@ void vibratePattern(int pulses, unsigned long onMs, unsigned long offMs) {
 }
 
 // =============================================================================
-//  DEEP SLEEP MODE
+//  WEB SERVER — HTML PAGE (existing — resetActivityTimer removed)
 // =============================================================================
 
-/**
- * Resets the inactivity timer. Call this whenever there's user interaction:
- * touch events, web page requests, file downloads, etc.
- */
-void resetActivityTimer() {
-  lastActivityMs = millis();
-}
-
-/**
- * Checks if the inactivity timeout has been reached.
- * Will NOT sleep if:
- *   - Sleep is disabled (SLEEP_TIMEOUT_SEC == 0)
- *   - Currently recording audio
- *   - A WiFi client is connected
- */
-void checkSleepTimeout() {
-  // Sleep disabled
-  if (SLEEP_TIMEOUT_SEC == 0) return;
-
-  // Don't sleep while recording
-  if (isRecording) {
-    resetActivityTimer();
-    return;
-  }
-
-  // Don't sleep if a WiFi client is connected
-  if (WiFi.softAPgetStationNum() > 0) {
-    resetActivityTimer();
-    return;
-  }
-
-  // Check if timeout has been reached
-  unsigned long elapsed = millis() - lastActivityMs;
-  if (elapsed >= (unsigned long)SLEEP_TIMEOUT_SEC * 1000UL) {
-    enterDeepSleep();
-  }
-}
-
-/**
- * Puts the ESP32-S3 into deep sleep mode.
- * The device will wake up when the touch pin is touched.
- * On wake, the device reboots and runs setup() again.
- */
-void enterDeepSleep() {
-  Serial.println();
-  Serial.println("💤 No activity detected — entering deep sleep...");
-  Serial.println("   Touch GPIO1 to wake up.");
-  Serial.println();
-  Serial.flush();
-
-  // Short double vibration to signal "going to sleep"
-  vibratePattern(3, 50, 50);
-  delay(200);
-
-  // Turn off WiFi to save power
-  server.stop();
-  WiFi.softAPdisconnect(true);
-  WiFi.mode(WIFI_OFF);
-
-  // Configure touch pin as wakeup source
-  touchSleepWakeUpEnable(TOUCH_BUTTON_MEMORY, SLEEP_TOUCH_THRESHOLD);
-
-  // Enter deep sleep (device reboots on wake)
-  esp_deep_sleep_start();
-}
-
-// =============================================================================
-//  WEB SERVER — HTML PAGE
-// =============================================================================
-
-/**
- * Serves the main web UI — a beautiful, mobile-friendly dark-themed page
- * that lists all memories with photo previews and audio players.
- */
 void handleRoot() {
-  resetActivityTimer();
+  lastActivityMs = millis();
   String html = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -1059,7 +1176,6 @@ void handleRoot() {
         const res = await fetch('/api/delete?name=' + encodeURIComponent(name));
         if (res.ok) {
           document.getElementById('card-' + name).remove();
-          // Update count
           const cards = document.querySelectorAll('.memory-card');
           document.getElementById('memCount').textContent = cards.length + ' memories';
           if (cards.length === 0) loadMemories();
@@ -1086,16 +1202,11 @@ void handleRoot() {
 }
 
 // =============================================================================
-//  WEB SERVER — LIST MEMORIES API
+//  WEB SERVER — LIST MEMORIES API (existing — resetActivityTimer removed)
 // =============================================================================
 
-/**
- * Returns a JSON array of all memory folders with their contents.
- * Example: {"memories":[{"name":"memory_001","photo":"/memory_001/photo.jpg",
- *           "audio":"/memory_001/audio.wav","hasPhoto":true,"hasAudio":true}]}
- */
 void handleListMemories() {
-  resetActivityTimer();
+  lastActivityMs = millis();
   if (!sdReady) {
     server.send(500, "application/json", "{\"error\":\"SD card not available\"}");
     return;
@@ -1109,7 +1220,6 @@ void handleListMemories() {
     File entry = root.openNextFile();
     while (entry) {
       String name = entry.name();
-      // Only include memory_xxx directories
       if (entry.isDirectory() && name.startsWith("memory_")) {
         if (!first) json += ",";
         first = false;
@@ -1137,15 +1247,11 @@ void handleListMemories() {
 }
 
 // =============================================================================
-//  WEB SERVER — SERVE FILE
+//  WEB SERVER — SERVE FILE (existing — resetActivityTimer removed)
 // =============================================================================
 
-/**
- * Streams a file from the SD card to the browser.
- * Usage: /file?path=/memory_001/photo.jpg
- */
 void handleFile() {
-  resetActivityTimer();
+  lastActivityMs = millis();
   if (!server.hasArg("path")) {
     server.send(400, "text/plain", "Missing 'path' parameter");
     return;
@@ -1163,7 +1269,6 @@ void handleFile() {
     return;
   }
 
-  // Determine content type from extension
   String contentType = "application/octet-stream";
   if (path.endsWith(".jpg") || path.endsWith(".jpeg")) {
     contentType = "image/jpeg";
@@ -1173,21 +1278,16 @@ void handleFile() {
     contentType = "image/png";
   }
 
-  // Stream the file to the client
   server.streamFile(file, contentType);
   file.close();
 }
 
 // =============================================================================
-//  WEB SERVER — DELETE MEMORY
+//  WEB SERVER — DELETE MEMORY (existing — resetActivityTimer removed)
 // =============================================================================
 
-/**
- * Deletes a memory folder and all its contents.
- * Usage: /api/delete?name=memory_001
- */
 void handleDelete() {
-  resetActivityTimer();
+  lastActivityMs = millis();
   if (!server.hasArg("name")) {
     server.send(400, "text/plain", "Missing 'name' parameter");
     return;
@@ -1196,7 +1296,6 @@ void handleDelete() {
   String name = server.arg("name");
   String folderPath = "/" + name;
 
-  // Safety check: only allow deleting memory_xxx folders
   if (!name.startsWith("memory_")) {
     server.send(403, "text/plain", "Can only delete memory folders");
     return;
@@ -1207,7 +1306,6 @@ void handleDelete() {
     return;
   }
 
-  // Delete files inside the folder first
   File dir = SD.open(folderPath);
   if (dir && dir.isDirectory()) {
     File f = dir.openNextFile();
@@ -1220,7 +1318,6 @@ void handleDelete() {
     dir.close();
   }
 
-  // Remove the empty folder
   SD.rmdir(folderPath);
 
   Serial.printf("[Web] Deleted: %s\n", folderPath.c_str());

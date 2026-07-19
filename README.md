@@ -1,32 +1,47 @@
-# XIAO ESP32S3 Sense — Memory Recorder + WiFi Browser
+# XIAO ESP32S3 Sense — Memory Recorder (Event-Driven)
 
-A simple Arduino project for the **Seeed Studio XIAO ESP32S3 Sense** that records "Memories" — a **photo + audio recording** saved together with a single touch — and lets you **browse them from your phone** via WiFi.
+A low-power Arduino firmware for the **Seeed Studio XIAO ESP32S3 Sense** that records "Memories" — a **photo + audio recording** — with a single touch, and lets you **browse them from your phone** via WiFi.
+
+Designed for **battery-powered wearable** use: the device stays in deep sleep (~10 µA) and wakes only when touched.
 
 ---
 
-## How It Works
+## Two Operating Modes
 
-| Touch | Action |
+The device distinguishes between **short touch** and **long touch** after waking from deep sleep:
+
+### Mode 1: Capture Memory (Short Touch — tap and release)
+
+```
+Touch → Wake → Photo → Record Audio → Touch to Stop → Save → Sleep
+```
+
+| Step | What happens |
 |---|---|
-| **First touch** (GPIO 1) | 📷 Capture photo + 🎙️ Start audio recording |
-| **Second touch** (GPIO 1) | ⏹️ Stop audio recording & save Memory |
+| 1 | Touch the sensor (quick tap) |
+| 2 | Device wakes, vibrates once (confirmation) |
+| 3 | Captures a photo, saves to SD |
+| 4 | Starts recording audio (vibrates buzz-buzz) |
+| 5 | Touch again to stop recording (or auto-stops at 60s) |
+| 6 | Saves WAV file, vibrates (buuuzz), returns to deep sleep |
 
-Each Memory is saved in its own folder:
-```
-📁 memory_001/
-   ├── photo.jpg   ← photo captured at the moment of touch
-   └── audio.wav   ← audio recorded until you touch again
+### Mode 2: Web Server (Long Touch — hold for 1+ second)
 
-📁 memory_002/
-   ├── photo.jpg
-   └── audio.wav
 ```
+Hold Touch → Wake → WiFi AP + Web UI → Browse Files → Idle → Sleep
+```
+
+| Step | What happens |
+|---|---|
+| 1 | Touch and hold the sensor for 1+ second |
+| 2 | Device wakes, vibrates three times (web mode) |
+| 3 | Starts WiFi Access Point |
+| 4 | Connect from phone to browse memories |
+| 5 | After 2 min of inactivity (no clients), sleeps |
 
 ---
 
 ## WiFi File Browser 📱
-
-The device creates a **WiFi hotspot**. Connect from your phone or laptop to browse, view, and download all saved memories.
 
 | Setting | Value |
 |---|---|
@@ -44,23 +59,79 @@ The device creates a **WiFi hotspot**. Connect from your phone or laptop to brow
 
 ---
 
+## Memory Storage
+
+Each memory is saved in its own folder on the SD card:
+```
+📁 memory_001/
+   ├── photo.jpg   ← captured at the moment of touch
+   └── audio.wav   ← recorded until you touch again
+
+📁 memory_002/
+   ├── photo.jpg
+   └── audio.wav
+```
+
+---
+
+## Power Architecture
+
+```
+           ┌──────────────────────────────────┐
+           │         DEEP SLEEP (~10 µA)       │
+           │     Device is OFF, waiting...     │
+           └──────────────┬───────────────────┘
+                          │ Touch wakeup
+                          ▼
+              ┌───────────────────────┐
+              │  Detect touch type    │
+              └───┬───────────────┬───┘
+         Short    │               │    Long
+                  ▼               ▼
+        ┌─────────────┐  ┌──────────────────┐
+        │ Mode 1      │  │ Mode 2           │
+        │ Capture     │  │ WiFi + Web UI    │
+        │ Photo+Audio │  │ Browse files     │
+        └──────┬──────┘  └────────┬─────────┘
+               │                  │ Idle timeout
+               ▼                  ▼
+           ┌──────────────────────────────────┐
+           │         DEEP SLEEP (~10 µA)       │
+           └──────────────────────────────────┘
+```
+
+### Power Consumption
+
+| State | Current Draw | When |
+|---|---|---|
+| Deep Sleep | ~10-20 µA | 99%+ of the time |
+| Mode 1 (Capture) | ~150-200 mA | Only during photo+audio |
+| Mode 2 (WiFi) | ~200-300 mA | Only when browsing files |
+
+> With a 100 mAh LiPo, the device can last **weeks to months** in standby.
+> Battery charging is fast because the MCU is asleep (~10 µA) during charging.
+
+---
+
 ## Features
 
-- **One-button operation** — single touch pin does everything
+- **Event-driven deep sleep** — wakes only when touched
+- **Two modes via touch duration** — short=capture, long=browse
 - **WiFi Access Point** — browse files from any device
-- **Deep Sleep mode** — auto-sleeps after inactivity, wakes on touch
 - Sequential filenames — never overwrites existing files
 - Proper WAV header for playback compatibility
 - Haptic feedback with distinct vibration patterns
-- Configurable vibration intensity via a single variable
+- Configurable vibration intensity
 - Auto-stop recording after 60 seconds
-- Graceful error handling if any peripheral fails
+- Camera deinitialized before recording (frees ~400KB PSRAM)
+- Memory index persists across sleep cycles (RTC memory)
+- Clean peripheral shutdown before every sleep
 
 ---
 
 ## Required Libraries
 
-All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra installs needed.
+All libraries are **built-in** with the ESP32-S3 Arduino board package:
 
 | Library | Purpose |
 |---|---|
@@ -77,26 +148,42 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 
 ## Board Configuration (Arduino IDE)
 
-1. **Install the board package**  
-   `File → Preferences → Additional Board Manager URLs` → add:  
-   ```
-   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-   ```
-   Then `Tools → Board → Board Manager` → search "esp32" → install.
+| Setting | Value | Notes |
+|---|---|---|
+| Board | `XIAO_ESP32S3` | |
+| PSRAM | **OPI PSRAM** | Required for camera |
+| USB CDC On Boot | **Enabled** | Required for Serial |
+| Flash Mode | QIO 80 MHz | |
+| Upload Speed | 921600 | |
+| Partition Scheme | Default 4MB with spiffs | |
 
-2. **Select the board**  
-   `Tools → Board → esp32 → XIAO_ESP32S3`
+---
 
-3. **Required settings**
+## Configurable Parameters
 
-| Setting | Value |
-|---|---|
-| Board | `XIAO_ESP32S3` |
-| PSRAM | **OPI PSRAM** ← _required for camera_ |
-| Flash Mode | QIO 80 MHz |
-| Upload Speed | 921600 |
-| USB CDC On Boot | Enabled |
-| Partition Scheme | Default 4MB with spiffs |
+All parameters are defined at the top of the sketch:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `TOUCH_THRESHOLD` | `22000` | Touch detection threshold |
+| `LONG_TOUCH_MS` | `1000` | Hold duration for Mode 2 (ms) |
+| `WEB_TIMEOUT_SEC` | `120` | Web server inactivity timeout (sec) |
+| `MAX_RECORD_SEC` | `60` | Max audio recording duration (sec) |
+| `vibrationIntensity` | `200` | Motor strength (0-255) |
+| `AP_SSID` | `XIAO_Memory` | WiFi network name |
+| `AP_PASSWORD` | `12345678` | WiFi password |
+
+---
+
+## Haptic Feedback Patterns
+
+| Event | Pattern | Meaning |
+|---|---|---|
+| Wakeup (Mode 1) | `buzz` (1 short) | Memory mode confirmed |
+| Recording started | `buzz-buzz` (2 short) | Now recording audio |
+| Recording saved | `buuuzz` (1 long) | Memory saved |
+| Web server started | `buzz-buzz-buzz` (3 short) | WiFi mode active |
+| Going to sleep | `bz-bz-bz` (3 quick) | Shutting down |
 
 ---
 
@@ -105,14 +192,14 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 ### Touch Button
 | Function | GPIO |
 |---|---|
-| Start/Stop Memory | GPIO 1 (D0) |
+| Start/Stop Memory, Mode Select | GPIO 1 (D0) |
 
 ### Vibration Motor
 | Function | GPIO |
 |---|---|
 | Motor PWM output | GPIO 3 (D2) |
 
-### PDM Microphone (Sense expansion board)
+### PDM Microphone
 | Function | GPIO |
 |---|---|
 | PDM Clock | GPIO 42 |
@@ -122,11 +209,8 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 | Function | GPIO |
 |---|---|
 | CS (Chip Select) | GPIO 21 |
-| SCK | GPIO 7 |
-| MISO | GPIO 8 |
-| MOSI | GPIO 9 |
 
-### OV2640 Camera (Sense expansion board)
+### OV2640 Camera
 | Function | GPIO |
 |---|---|
 | XCLK | 10 |
@@ -139,112 +223,24 @@ All libraries are **built-in** with the ESP32-S3 Arduino board package. No extra
 
 ---
 
-## Function Reference
-
-| Function | Description |
-|---|---|
-| `setup()` | Initialises all peripherals, WiFi AP, and web server. |
-| `loop()` | Handles web requests, streams audio while recording, polls touch. |
-| `initSDCard()` | Mounts the SD card via SPI. |
-| `initCamera()` | Configures and starts the OV2640 camera. |
-| `initMicrophone()` | Installs the I2S driver in PDM-RX mode. |
-| `initVibrationMotor()` | Configures GPIO 3 with LEDC PWM. |
-| `initWiFiAP()` | Creates a WiFi Access Point hotspot. |
-| `setupWebServer()` | Registers URL routes and starts the HTTP server. |
-| `startMemory()` | Creates folder, captures photo, starts audio recording. |
-| `stopMemory()` | Patches WAV header, closes file, vibrates. |
-| `recordAudioChunk()` | Reads one I2S buffer and writes to WAV file. |
-| `findNextMemoryIndex()` | Finds next unused folder index on SD. |
-| `savePhoto(path)` | Captures JPEG and writes to SD. |
-| `handleRoot()` | Serves the main HTML/CSS/JS web UI page. |
-| `handleListMemories()` | Returns JSON list of all memory folders. |
-| `handleFile()` | Streams a file from SD card to the browser. |
-| `handleDelete()` | Deletes a memory folder and its contents. |
-| `resetActivityTimer()` | Resets the inactivity timer (prevents sleep). |
-| `checkSleepTimeout()` | Checks if inactivity timeout reached; enters sleep if so. |
-| `enterDeepSleep()` | Shuts down WiFi, configures touch wakeup, enters deep sleep. |
-
----
-
-## Haptic Feedback Patterns
-
-| Event | Pattern | Timing |
-|---|---|---|
-| Start Memory | `buzz-buzz` (two short pulses) | 80ms on, 80ms off, 80ms on |
-| Stop Memory | `buuuzz` (one long pulse) | 300ms on |
-| Going to Sleep | `bz-bz-bz` (three quick pulses) | 50ms on, 50ms off ×3 |
-| Waking Up | `buzz` (one short pulse) | 100ms on |
-
-### Vibration Intensity
-
-Adjust `vibrationIntensity` at the top of the sketch:
-
-| Value | Strength |
-|---|---|
-| `64` | Light |
-| `128` | **Medium (default)** |
-| `200` | Strong |
-| `255` | Maximum |
----
-
-## Sleep Mode 💤
-
-To conserve battery, the device automatically enters **deep sleep** after a period of inactivity.
-
-| Setting | Default | Location in code |
-|---|---|---|
-| Inactivity timeout | `120` seconds (2 min) | `SLEEP_TIMEOUT_SEC` |
-| Touch wakeup threshold | `22000` | `SLEEP_TOUCH_THRESHOLD` |
-
-### What keeps it awake?
-- **Touch interaction** — any touch resets the timer
-- **WiFi client connected** — as long as someone is browsing files
-- **Active recording** — never sleeps during a memory capture
-
-### What happens when it sleeps?
-1. Vibrates 3 quick pulses (bz-bz-bz)
-2. Shuts down WiFi
-3. Enters deep sleep (~10 μA current draw)
-4. Touch the sensor → device reboots fully and vibrates once
-
-> **Tip:** Set `SLEEP_TIMEOUT_SEC` to `0` to disable sleep entirely.
-
----
-
-## Audio Format
-
-| Parameter | Value |
-|---|---|
-| Sample Rate | 16 000 Hz |
-| Bit Depth | 16-bit |
-| Channels | 1 (Mono) |
-| Format | PCM (uncompressed) |
-| Container | WAV (RIFF) |
-| Duration | Variable (max 60 seconds) |
-| File Size | ~32 KB per second of recording |
-
----
-
 ## Hardware Setup
 
-1. Attach the **Sense expansion board** to the XIAO ESP32S3 via the B2B connector.
-2. Insert a **FAT32-formatted** microSD card (≤ 32 GB recommended).
-3. Connect vibration motor to **GPIO 3 (D2)** via a transistor/MOSFET.
-4. Connect the board via USB-C.
-5. If the board does not appear as a COM port, hold **BOOT** while plugging in.
+1. Attach the **Sense expansion board** via the B2B connector
+2. Insert a **FAT32-formatted** microSD card (≤ 32 GB)
+3. Connect vibration motor to **GPIO 3 (D2)** via transistor/MOSFET
+4. Connect via USB-C
+5. If the board doesn't appear, hold **BOOT** while plugging in
 
 ---
 
 ## Touch Threshold Calibration
 
-The default threshold is `40000`. To calibrate for your setup:
+1. Upload the `Touch_Test` sketch (included in this repo)
+2. Open Serial Monitor at **115200 baud**
+3. Note idle values vs touched values
+4. Set `TOUCH_THRESHOLD` to roughly halfway between them
 
-1. Upload the `Touch_Test` sketch first (included in this repo).
-2. Open the Serial Monitor at **115200 baud**.
-3. Note the **idle** value (not touching) and the **touched** value.
-4. Set `TOUCH_THRESHOLD` to roughly halfway between the two.
-
-> **Note:** On ESP32-S3, touch values **increase** when touched (opposite of original ESP32).
+> **Note:** On ESP32-S3, touch values **increase** when touched.
 
 ---
 
@@ -253,14 +249,29 @@ The default threshold is `40000`. To calibrate for your setup:
 | Problem | Solution |
 |---|---|
 | "SD card mount failed" | Check card is FAT32, firmly seated, ≤ 32 GB |
-| "Camera init failed: 0x…" | Ensure PSRAM is set to **OPI PSRAM** in IDE |
-| Touch triggers immediately | Calibrate `TOUCH_THRESHOLD` (see above) |
-| Audio sounds like static | Verify PDM mode is enabled (`I2S_MODE_PDM`) |
+| "Camera init failed" | Ensure PSRAM is set to **OPI PSRAM** |
+| Device won't wake from sleep | Calibrate `SLEEP_TOUCH_THRESHOLD` |
+| Mode 2 triggers instead of Mode 1 | Release the touch faster (< 1 sec) |
+| Mode 1 triggers instead of Mode 2 | Hold the touch longer (> 1 sec) |
+| No Serial output after wake | Enable **USB CDC On Boot** in IDE settings |
+| Serial monitor disconnects | Normal — USB is lost during deep sleep |
 | Board not detected | Hold BOOT button while connecting USB |
-| Can't connect to WiFi | Look for `XIAO_Memory` in WiFi list, password: `12345678` |
-| Web page not loading | Make sure you're connected to the XIAO WiFi, open `http://192.168.4.1` |
-| Device keeps sleeping | Increase `SLEEP_TIMEOUT_SEC` or set to `0` to disable |
-| Won't wake from sleep | Check touch calibration; adjust `SLEEP_TOUCH_THRESHOLD` |
+
+---
+
+## Project Structure
+
+```
+XIAO/
+├── XIAO_Sense_Touch/
+│   └── XIAO_Sense_Touch.ino      ← Main project (event-driven)
+├── Touch_Test/
+│   └── Touch_Test.ino             ← Touch calibration utility
+├── DeepSleep_Touch_Test/
+│   └── DeepSleep_Touch_Test.ino   ← Deep sleep validation test
+├── README.md
+└── .gitignore
+```
 
 ---
 

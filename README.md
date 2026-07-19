@@ -116,6 +116,9 @@ Each memory is saved in its own folder on the SD card:
 
 ---
 
+<img width="2048" height="2048" alt="Product Design" src="https://github.com/user-attachments/assets/e798ee77-bc3e-4b1c-8dc6-34dca91d47af" />
+
+
 ## Features
 
 - **Event-driven deep sleep** — wakes only when touched

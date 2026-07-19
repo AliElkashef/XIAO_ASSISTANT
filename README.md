@@ -1,5 +1,8 @@
 # XIAO ESP32S3 Sense — Memory Recorder (Event-Driven)
 
+<img width="1536" height="1024" alt="Memory Pin" src="https://github.com/user-attachments/assets/2ec47771-8417-43eb-a155-f868f5165a0a" />
+
+
 A low-power Arduino firmware for the **Seeed Studio XIAO ESP32S3 Sense** that records "Memories" — a **photo + audio recording** — with a single touch, and lets you **browse them from your phone** via WiFi.
 
 Designed for **battery-powered wearable** use: the device stays in deep sleep (~10 µA) and wakes only when touched.

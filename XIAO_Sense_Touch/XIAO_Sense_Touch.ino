@@ -119,13 +119,16 @@ const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 // ─── Touch & Mode Detection Parameters ──────────────────────────────────────
 
 // On ESP32-S3, touchRead() values INCREASE when touched.
-#define TOUCH_THRESHOLD       22000     // Active-mode touch detection
-#define SLEEP_TOUCH_THRESHOLD 22000     // Deep sleep wakeup threshold
-#define DEBOUNCE_MS           300       // Debounce delay
+#define THRESHOLD_MULTIPLIER   1.8    // Wakeup threshold = Baseline * multiplier
+#define NOISE_MARGIN_RATIO     1.3    // Threshold below which we consider the sensor untouched
+#define EMA_ALPHA              0.15   // Adaptation rate (higher since sleep boots are infrequent)
+#define CALIBRATION_SAMPLES    50     // Samples for initial boot calibration
+#define CALIBRATION_DELAY_MS   10     // Delay between calibration samples
+#define DEBOUNCE_MS            300    // Debounce delay
 
 // Touch hold duration to distinguish short vs long touch.
 // After wakeup, if the user holds for longer than this → Mode 2 (Web Server)
-#define LONG_TOUCH_MS         1000      // 1 second = long touch
+#define LONG_TOUCH_MS          2000   // 2 seconds = long touch
 
 // ─── Web Server Timeout ──────────────────────────────────────────────────────
 
@@ -150,7 +153,8 @@ enum TouchType {
 // ─── Global State ────────────────────────────────────────────────────────────
 
 // Persists across deep sleep cycles (stored in RTC slow memory)
-RTC_DATA_ATTR int memoryIndex = 0;
+RTC_DATA_ATTR int   memoryIndex = 0;
+RTC_DATA_ATTR float rtcBaseline = 0.0; // Dynamic baseline stored in RTC memory
 
 // Runtime state
 static bool sdReady          = false;  // Needed by web handlers
@@ -204,16 +208,28 @@ void   handleDelete();
 
 void setup() {
   Serial.begin(115200);
-  waitForSerial(2000);
+  waitForSerial(4000);
 
   Serial.println();
   Serial.println("==========================================");
   Serial.println("  XIAO ESP32S3 Sense — Memory Recorder");
   Serial.println("       (Event-Driven Deep Sleep)");
   Serial.println("==========================================");
-
+  delay(5000);
   // Always init vibration motor first (needed for all modes)
   initVibrationMotor();
+
+  // Establish Baseline on First Boot
+  if (rtcBaseline < 10.0) {
+    Serial.println("  [Calibrating] First boot baseline calibration...");
+    uint64_t sum = 0;
+    for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
+      sum += touchRead(TOUCH_BUTTON_MEMORY);
+      delay(CALIBRATION_DELAY_MS);
+    }
+    rtcBaseline = (float)sum / CALIBRATION_SAMPLES;
+    Serial.printf("  [Calibrated] Initial baseline: %.2f\n", rtcBaseline);
+  }
 
   // Detect what kind of touch woke us up
   TouchType touchType = detectTouchType();
@@ -299,13 +315,14 @@ TouchType detectTouchType() {
 
   // Measure how long the user holds the touch after wakeup
   unsigned long holdStart = millis();
+  float currentThreshold = rtcBaseline * THRESHOLD_MULTIPLIER;
 
-  while (touchRead(TOUCH_BUTTON_MEMORY) > TOUCH_THRESHOLD) {
+  while (touchRead(TOUCH_BUTTON_MEMORY) > currentThreshold) {
     // Still holding...
     if ((millis() - holdStart) >= LONG_TOUCH_MS) {
-      Serial.println("  → LONG TOUCH detected (held > 1 sec)");
+      Serial.println("  → LONG TOUCH detected (held > 2 sec)");
       // Wait for release before continuing
-      while (touchRead(TOUCH_BUTTON_MEMORY) > TOUCH_THRESHOLD) {
+      while (touchRead(TOUCH_BUTTON_MEMORY) > currentThreshold) {
         delay(50);
       }
       delay(DEBOUNCE_MS);
@@ -429,6 +446,7 @@ void captureMemory() {
 
   // ── Step 8: Blocking recording loop ──
   bool recording = true;
+  float currentThreshold = rtcBaseline * THRESHOLD_MULTIPLIER;
   while (recording) {
     // Read audio chunk and write to SD
     uint8_t buffer[I2S_READ_BUF_SIZE];
@@ -441,12 +459,12 @@ void captureMemory() {
     }
 
     // Check for stop: user touches the sensor again
-    if (touchRead(TOUCH_BUTTON_MEMORY) > TOUCH_THRESHOLD) {
+    if (touchRead(TOUCH_BUTTON_MEMORY) > currentThreshold) {
       delay(DEBOUNCE_MS);
-      if (touchRead(TOUCH_BUTTON_MEMORY) > TOUCH_THRESHOLD) {
+      if (touchRead(TOUCH_BUTTON_MEMORY) > currentThreshold) {
         Serial.println("  [Touch] Stop recording.");
         // Wait for release
-        while (touchRead(TOUCH_BUTTON_MEMORY) > TOUCH_THRESHOLD) {
+        while (touchRead(TOUCH_BUTTON_MEMORY) > currentThreshold) {
           delay(50);
         }
         recording = false;
@@ -559,7 +577,34 @@ void checkWebTimeout() {
 void goToSleep() {
   Serial.println();
   Serial.println("💤 Entering deep sleep...");
-  Serial.println("   Touch GPIO1 to wake up.");
+
+  // Wait for touch release before sleeping to update baseline and prevent immediate wakeup
+  float releaseThreshold = rtcBaseline * NOISE_MARGIN_RATIO;
+  unsigned long releaseStart = millis();
+  while (touchRead(TOUCH_BUTTON_MEMORY) > releaseThreshold && (millis() - releaseStart < 4000)) {
+    delay(50); // Timeout after 4s
+  }
+  delay(200); // Settle time
+
+  // Dynamic Baseline Tracking: Take 10 idle samples to update our baseline
+  uint64_t sum = 0;
+  for (int i = 0; i < 10; i++) {
+    sum += touchRead(TOUCH_BUTTON_MEMORY);
+    delay(10);
+  }
+  float idleAverage = (float)sum / 10.0;
+
+  // Only update baseline if the values are in the untouched region
+  if (idleAverage < rtcBaseline * NOISE_MARGIN_RATIO) {
+    float oldBaseline = rtcBaseline;
+    rtcBaseline = (rtcBaseline * (1.0 - EMA_ALPHA)) + (idleAverage * EMA_ALPHA);
+    Serial.printf("  [EMA Update] Baseline drifted: %.2f -> %.2f\n", oldBaseline, rtcBaseline);
+  } else {
+    Serial.println("  [EMA Skip] Sensor active or noisy; skipping baseline update.");
+  }
+
+  float currentThreshold = rtcBaseline * THRESHOLD_MULTIPLIER;
+  Serial.printf("   Touch GPIO1 to wake up (Wake threshold: %.0f).\n", currentThreshold);
   Serial.println();
 
   // Flush serial before sleeping (safe check for USB CDC)
@@ -583,8 +628,8 @@ void goToSleep() {
   // Close SD card if mounted
   SD.end();
 
-  // Configure touch wakeup
-  touchSleepWakeUpEnable(TOUCH_BUTTON_MEMORY, SLEEP_TOUCH_THRESHOLD);
+  // Configure touch wakeup with dynamic threshold
+  touchSleepWakeUpEnable(TOUCH_BUTTON_MEMORY, (uint32_t)currentThreshold);
 
   // Enter deep sleep (device reboots on wake)
   esp_deep_sleep_start();

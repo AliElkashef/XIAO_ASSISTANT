@@ -165,8 +165,10 @@ All parameters are defined at the top of the sketch:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `TOUCH_THRESHOLD` | `22000` | Touch detection threshold |
-| `LONG_TOUCH_MS` | `1000` | Hold duration for Mode 2 (ms) |
+| `THRESHOLD_MULTIPLIER` | `1.8` | Touch threshold = Baseline * multiplier |
+| `NOISE_MARGIN_RATIO` | `1.3` | Settle buffer margin above baseline for idle tracking |
+| `EMA_ALPHA` | `0.15` | Adaptation rate of the baseline moving average |
+| `LONG_TOUCH_MS` | `2000` | Hold duration for Mode 2 (ms) |
 | `WEB_TIMEOUT_SEC` | `120` | Web server inactivity timeout (sec) |
 | `MAX_RECORD_SEC` | `60` | Max audio recording duration (sec) |
 | `vibrationIntensity` | `200` | Motor strength (0-255) |
@@ -233,14 +235,14 @@ All parameters are defined at the top of the sketch:
 
 ---
 
-## Touch Threshold Calibration
+## Touch Threshold & Calibration
 
-1. Upload the `Touch_Test` sketch (included in this repo)
-2. Open Serial Monitor at **115200 baud**
-3. Note idle values vs touched values
-4. Set `TOUCH_THRESHOLD` to roughly halfway between them
+Instead of using a hardcoded threshold, the firmware calibrates itself dynamically:
+1. **Initial Calibration:** At first boot, the sketch takes 50 samples to calculate the untouched baseline and stores it in RTC memory.
+2. **Dynamic Baseline Drift Tracking:** Every time the device is about to enter sleep (and after the finger is released), it reads 10 idle samples. It slowly corrects the baseline via Exponential Moving Average (EMA) to adjust for temperature, humidity, or wire positioning.
+3. **Threshold calculation:** The wakeup threshold is dynamically adjusted as `Baseline * THRESHOLD_MULTIPLIER`.
 
-> **Note:** On ESP32-S3, touch values **increase** when touched.
+> **Plotter Check:** Use the `Touch_Test` sketch (included in this repo) and open the **Serial Plotter** to see how baseline tracking behaves dynamically in real-time.
 
 ---
 
@@ -250,9 +252,10 @@ All parameters are defined at the top of the sketch:
 |---|---|
 | "SD card mount failed" | Check card is FAT32, firmly seated, ≤ 32 GB |
 | "Camera init failed" | Ensure PSRAM is set to **OPI PSRAM** |
-| Device won't wake from sleep | Calibrate `SLEEP_TOUCH_THRESHOLD` |
-| Mode 2 triggers instead of Mode 1 | Release the touch faster (< 1 sec) |
-| Mode 1 triggers instead of Mode 2 | Hold the touch longer (> 1 sec) |
+| Device won't wake from sleep | Decrease `THRESHOLD_MULTIPLIER` (e.g., `1.5`) |
+| Device wakes up by itself | Increase `THRESHOLD_MULTIPLIER` (e.g., `2.0` or `2.2`) |
+| Mode 2 triggers instead of Mode 1 | Release the touch faster (< 2 sec) |
+| Mode 1 triggers instead of Mode 2 | Hold the touch longer (> 2 sec) |
 | No Serial output after wake | Enable **USB CDC On Boot** in IDE settings |
 | Serial monitor disconnects | Normal — USB is lost during deep sleep |
 | Board not detected | Hold BOOT button while connecting USB |

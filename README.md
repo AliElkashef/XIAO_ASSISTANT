@@ -194,6 +194,8 @@ All parameters are defined at the top of the sketch:
 | Going to sleep | `bz-bz-bz` (3 quick) | Shutting down |
 
 ---
+<img width="1376" height="768" alt="Premium Hardware Showcase" src="https://github.com/user-attachments/assets/d1321489-425a-4e42-8a84-bfdf620c474f" />
+
 
 ## Pin Definitions
 

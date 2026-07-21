@@ -55,12 +55,19 @@
 // All of GPIO 1-9 support capacitive touch on ESP32-S3.
 #define WAKEUP_TOUCH_PIN       1      // GPIO 1 (D0) — same as main project
 
-// Touch threshold for deep sleep wakeup.
-// On ESP32-S3, touch values INCREASE when touched.
-// This threshold tells the RTC controller: "wake up if touch > threshold"
-// Start with a low value; increase if the board wakes up by itself.
-// Use the printed calibration values to fine-tune.
-#define WAKEUP_TOUCH_THRESHOLD 22000
+// ─── Dynamic Calibration Configuration ───────────────────────────────────────
+
+// On ESP32-S3, touchSleepWakeUpEnable expects a DELTA value (change in capacitance).
+// It triggers wakeup when: (Touched_Value - Baseline_Value) > Delta_Threshold
+// We calculate this delta dynamically as: Delta_Threshold = Baseline * DELTA_RATIO.
+//
+// If the board doesn't wake up: DECREASE DELTA_RATIO (e.g. to 0.4 or 0.3) for more sensitivity.
+// If the board wakes up by itself: INCREASE DELTA_RATIO (e.g. to 0.7 or 0.8) for less sensitivity.
+#define DELTA_RATIO            0.5    // Wakeup threshold delta = 50% of baseline (more sensitive & reliable)
+#define NOISE_MARGIN_RATIO     1.3    // Threshold below which we consider the sensor untouched
+#define EMA_ALPHA              0.15   // Adaptation rate (higher since sleep boots are infrequent)
+#define CALIBRATION_SAMPLES    50     // Samples for initial boot calibration
+#define CALIBRATION_DELAY_MS   10     // Delay between calibration samples
 
 // Built-in LED on XIAO ESP32S3
 // GPIO 21 — ACTIVE LOW (LOW = ON, HIGH = OFF)
@@ -82,10 +89,11 @@ const char* touchLabels[NUM_TOUCH_PINS] = {
 };
 
 // =============================================================================
-//  PERSISTENT COUNTER — Survives deep sleep (stored in RTC memory)
+//  PERSISTENT COUNTERS & STATE — Survive deep sleep (RTC memory)
 // =============================================================================
 
-RTC_DATA_ATTR int bootCount = 0;
+RTC_DATA_ATTR int   bootCount = 0;
+RTC_DATA_ATTR float rtcBaseline = 0.0; // Dynamic baseline stored in RTC memory
 
 // =============================================================================
 //  HELPER FUNCTIONS
@@ -138,9 +146,8 @@ void blinkLED(int times, int onMs, int offMs) {
 
 /**
  * Reads and prints current touch values for all configured pins.
- * This helps you calibrate the wakeup threshold.
  */
-void printTouchCalibration() {
+void printTouchCalibration(float currentDelta) {
   Serial.println("  ┌──────────────────────────────────────────┐");
   Serial.println("  │         Current Touch Readings            │");
   Serial.println("  ├──────────────┬────────────┬──────────────┤");
@@ -149,13 +156,17 @@ void printTouchCalibration() {
 
   for (int i = 0; i < NUM_TOUCH_PINS; i++) {
     uint32_t val = touchRead(touchPins[i]);
-    const char* status = (val > WAKEUP_TOUCH_THRESHOLD) ? "TOUCHED!" : "idle";
+    float pinBaseline = (touchPins[i] == WAKEUP_TOUCH_PIN) ? rtcBaseline : (float)val; // Fallback for other pins
+    float pinDelta = (touchPins[i] == WAKEUP_TOUCH_PIN) ? currentDelta : (pinBaseline * DELTA_RATIO);
+    bool touched = (val > (pinBaseline + pinDelta));
+    const char* status = touched ? "TOUCHED!" : "idle";
     Serial.printf("  │ %-12s │ %10lu │ %-12s │\n", touchLabels[i], val, status);
   }
 
   Serial.println("  └──────────────┴────────────┴──────────────┘");
-  Serial.printf("  Wakeup threshold: %d\n", WAKEUP_TOUCH_THRESHOLD);
-  Serial.println("  (Wake triggers when touch value > threshold)");
+  Serial.printf("  RTC Baseline     : %.2f\n", rtcBaseline);
+  Serial.printf("  Wake threshold   : %.2f (Baseline + Delta)\n", rtcBaseline + currentDelta);
+  Serial.printf("  Wakeup Delta (D) : %.2f (Expected trigger change)\n", currentDelta);
 }
 
 // =============================================================================
@@ -163,98 +174,112 @@ void printTouchCalibration() {
 // =============================================================================
 
 void setup() {
-  // ── 1. Initialize LED immediately (visual feedback even without Serial) ──
-  blinkLED(1, 100, 0);  // Quick single blink = "I'm alive"
+  // ── 1. Initialize LED immediately (visual feedback) ──
+  blinkLED(1, 100, 0);
 
-  // ── 2. Initialize Serial and wait for USB CDC reconnection ──
+  // ── 2. Initialize Serial ──
   Serial.begin(115200);
-  waitForSerial(3000);  // Wait up to 3 seconds for USB
+  waitForSerial(3000);
 
-  // ── 3. Increment and display boot count ──
   bootCount++;
 
   Serial.println();
   Serial.println("╔══════════════════════════════════════════════╗");
   Serial.println("║  Deep Sleep + Touch Wakeup — Validation Test ║");
-  Serial.println("║  Board: XIAO ESP32S3 Sense                   ║");
+  Serial.println("║         (With Dynamic Calibration)           ║");
   Serial.println("╚══════════════════════════════════════════════╝");
-  Serial.printf("  Boot count: %d (survives deep sleep via RTC memory)\n", bootCount);
+  Serial.printf("  Boot count: %d\n", bootCount);
   Serial.println();
 
-  // ── 4. Determine and print wakeup reason ──
   esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
   Serial.printf("  Wakeup cause: %s\n", getWakeupReasonString(wakeupCause));
 
-  if (wakeupCause == ESP_SLEEP_WAKEUP_TOUCHPAD) {
-    // Try to identify which touch pad triggered the wakeup
-    touch_pad_t touchPin = esp_sleep_get_touchpad_wakeup_status();
-    Serial.printf("  Touch pad #: %d\n", touchPin);
-    Serial.println();
-
-    // ── 5. BLINK LED 3 times to confirm touch wakeup ──
-    Serial.println("  >>> Blinking LED 3 times (confirming touch wakeup)...");
-    blinkLED(3, 300, 300);
-    Serial.println("  >>> LED blink complete.");
-
-    // ── 6. Wait 2 seconds (as required by spec) ──
-    Serial.println("  >>> Waiting 2 seconds before returning to sleep...");
-    delay(2000);
-
-  } else {
-    // First boot or non-touch wakeup
-    Serial.println("  (This is a cold boot or non-touch wakeup)");
-    Serial.println();
+  // ── 3. Establish Baseline on First Boot ──
+  if (rtcBaseline < 10.0) {
+    Serial.println("  [Calibrating] First boot baseline calibration...");
+    Serial.println("  Keep hands off the touch sensor!");
+    
+    uint64_t sum = 0;
+    for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
+      sum += touchRead(WAKEUP_TOUCH_PIN);
+      delay(CALIBRATION_DELAY_MS);
+    }
+    rtcBaseline = (float)sum / CALIBRATION_SAMPLES;
+    Serial.printf("  [Calibrated] Initial baseline set to: %.2f\n", rtcBaseline);
   }
 
-  // ── 7. Print touch calibration data ──
+  // Calculate current delta
+  float currentDelta = rtcBaseline * DELTA_RATIO;
+
+  if (wakeupCause == ESP_SLEEP_WAKEUP_TOUCHPAD) {
+    touch_pad_t touchPin = esp_sleep_get_touchpad_wakeup_status();
+    Serial.printf("  Touch pad #: %d\n", touchPin);
+
+    // ── 4. Wait for touch release to update baseline safely ──
+    Serial.println("  >>> Waiting for touch release...");
+    unsigned long releaseStart = millis();
+    float releaseThreshold = rtcBaseline * NOISE_MARGIN_RATIO;
+    while (touchRead(WAKEUP_TOUCH_PIN) > releaseThreshold && (millis() - releaseStart < 4000)) {
+      delay(50); // Timeout after 4s
+    }
+    delay(200); // Settle time
+    
+    // Blink LED 3 times to confirm wakeup
+    blinkLED(3, 300, 300);
+
+    // ── 5. Dynamic Baseline Tracking ──
+    // Take 10 idle samples to update our drift baseline
+    uint64_t sum = 0;
+    for (int i = 0; i < 10; i++) {
+      sum += touchRead(WAKEUP_TOUCH_PIN);
+      delay(10);
+    }
+    float idleAverage = (float)sum / 10.0;
+
+    // Only update baseline if the values are in the untouched region
+    if (idleAverage < rtcBaseline * NOISE_MARGIN_RATIO) {
+      float oldBaseline = rtcBaseline;
+      rtcBaseline = (rtcBaseline * (1.0 - EMA_ALPHA)) + (idleAverage * EMA_ALPHA);
+      currentDelta = rtcBaseline * DELTA_RATIO;
+      Serial.printf("  [EMA Update] Baseline drifted: %.2f -> %.2f | New Delta: %.2f\n",
+                    oldBaseline, rtcBaseline, currentDelta);
+    } else {
+      Serial.println("  [EMA Skip] Sensor still active; skipping baseline update.");
+    }
+
+    // Wait remaining time of the 2-second pause
+    delay(1000);
+  }
+
+  // ── 6. Print diagnostics ──
   Serial.println();
-  printTouchCalibration();
+  printTouchCalibration(currentDelta);
   Serial.println();
 
-  // ── 8. Configure touch wakeup ──
-  Serial.printf("  Configuring touch wakeup: GPIO %d, threshold %d\n",
-                WAKEUP_TOUCH_PIN, WAKEUP_TOUCH_THRESHOLD);
+  // ── 7. Configure wakeup and sleep ──
+  Serial.printf("  Configuring touch wakeup: GPIO %d, delta threshold %.0f\n",
+                WAKEUP_TOUCH_PIN, currentDelta);
 
-  touchSleepWakeUpEnable(WAKEUP_TOUCH_PIN, WAKEUP_TOUCH_THRESHOLD);
+  touchSleepWakeUpEnable(WAKEUP_TOUCH_PIN, (uint32_t)currentDelta);
 
   Serial.println();
   Serial.println("  ┌─────────────────────────────────────────┐");
   Serial.println("  │  💤 Entering DEEP SLEEP now...           │");
-  Serial.println("  │                                          │");
-  Serial.printf( "  │  Touch GPIO %d (D0) to wake up.          │\n", WAKEUP_TOUCH_PIN);
-  Serial.println("  │                                          │");
-  Serial.println("  │  The USB connection will disconnect.     │");
-  Serial.println("  │  Keep the Serial Monitor open.           │");
-  Serial.println("  │  LED will blink 3x on successful wakeup.│");
+  Serial.println("  │  Touch GPIO 1 (D0) to wake up.          │");
   Serial.println("  └─────────────────────────────────────────┘");
   Serial.println();
 
-  // ── 9. Flush Serial before sleeping ──
-  // Note: Serial.flush() can block on ESP32-S3 USB CDC if host isn't
-  // listening. We use a small delay instead for safety.
   if (Serial) {
     Serial.flush();
   }
   delay(100);
 
-  // ── 10. Enter deep sleep ──
   esp_deep_sleep_start();
-
-  // ── This line should NEVER be reached ──
   Serial.println("[ERROR] Deep sleep failed!");
 }
 
-// =============================================================================
-//  LOOP — Intentionally empty
-// =============================================================================
-
-/**
- * The device should never reach loop() because it enters deep sleep
- * at the end of setup(). If this function runs, something went wrong.
- */
 void loop() {
-  // If we somehow reach here, print an error and try to sleep again
-  Serial.println("[ERROR] loop() reached — deep sleep did not engage!");
+  Serial.println("[ERROR] loop() reached!");
   delay(5000);
   esp_deep_sleep_start();
 }

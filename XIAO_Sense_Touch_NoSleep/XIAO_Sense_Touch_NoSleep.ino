@@ -117,13 +117,13 @@ const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 
 // Vibration intensity: 0 (off) to 255 (max). Change this to adjust strength.
 // Suggested values:  64 = light,  128 = medium,  200 = strong,  255 = max
-static uint8_t vibrationIntensity = 128;   // ← DEFAULT: medium
+static uint8_t vibrationIntensity = 180;   // ← DEFAULT: medium
 
 // ─── Touch Sensor Parameters ─────────────────────────────────────────────────
 
 // On ESP32-S3, touchRead() values INCREASE when touched.
 // Adjust this threshold after checking Serial output during first boot.
-#define TOUCH_THRESHOLD       40000
+#define TOUCH_THRESHOLD       22000
 #define DEBOUNCE_MS           300       // Milliseconds between re-reads
 
 // ─── Global State ────────────────────────────────────────────────────────────

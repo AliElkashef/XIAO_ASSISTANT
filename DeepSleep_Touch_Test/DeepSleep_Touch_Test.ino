@@ -63,7 +63,7 @@
 //
 // If the board doesn't wake up: DECREASE DELTA_RATIO (e.g. to 0.4 or 0.3) for more sensitivity.
 // If the board wakes up by itself: INCREASE DELTA_RATIO (e.g. to 0.7 or 0.8) for less sensitivity.
-#define DELTA_RATIO            0.5    // Wakeup threshold delta = 50% of baseline (more sensitive & reliable)
+#define DELTA_RATIO            0.1    // Wakeup threshold delta = 50% of baseline (more sensitive & reliable)
 #define NOISE_MARGIN_RATIO     1.3    // Threshold below which we consider the sensor untouched
 #define EMA_ALPHA              0.15   // Adaptation rate (higher since sleep boots are infrequent)
 #define CALIBRATION_SAMPLES    50     // Samples for initial boot calibration
@@ -226,6 +226,7 @@ void setup() {
     
     // Blink LED 3 times to confirm wakeup
     blinkLED(3, 300, 300);
+    delay(5000);
 
     // ── 5. Dynamic Baseline Tracking ──
     // Take 10 idle samples to update our drift baseline

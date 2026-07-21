@@ -119,7 +119,7 @@ const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 // ─── Touch & Mode Detection Parameters ──────────────────────────────────────
 
 // On ESP32-S3, touchRead() values INCREASE when touched.
-#define THRESHOLD_MULTIPLIER   1.8    // Wakeup threshold = Baseline * multiplier
+#define DELTA_RATIO           0.5    // Touch wakeup delta = 50% of baseline (more sensitive & reliable)
 #define NOISE_MARGIN_RATIO     1.3    // Threshold below which we consider the sensor untouched
 #define EMA_ALPHA              0.15   // Adaptation rate (higher since sleep boots are infrequent)
 #define CALIBRATION_SAMPLES    50     // Samples for initial boot calibration
@@ -128,13 +128,13 @@ const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 
 // Touch hold duration to distinguish short vs long touch.
 // After wakeup, if the user holds for longer than this → Mode 2 (Web Server)
-#define LONG_TOUCH_MS          2000   // 2 seconds = long touch
+#define LONG_TOUCH_MS          3000   // 2 seconds = long touch
 
 // ─── Web Server Timeout ──────────────────────────────────────────────────────
 
 // In Mode 2, how many seconds of no web activity (and no WiFi clients)
 // before the device returns to deep sleep.
-#define WEB_TIMEOUT_SEC       120       // 2 minutes
+#define WEB_TIMEOUT_SEC       200       // 2 minutes
 
 // ─── Vibration Motor Parameters ──────────────────────────────────────────────
 
@@ -315,7 +315,7 @@ TouchType detectTouchType() {
 
   // Measure how long the user holds the touch after wakeup
   unsigned long holdStart = millis();
-  float currentThreshold = rtcBaseline * THRESHOLD_MULTIPLIER;
+  float currentThreshold = rtcBaseline + (rtcBaseline * DELTA_RATIO); // Absolute value check
 
   while (touchRead(TOUCH_BUTTON_MEMORY) > currentThreshold) {
     // Still holding...
@@ -446,7 +446,7 @@ void captureMemory() {
 
   // ── Step 8: Blocking recording loop ──
   bool recording = true;
-  float currentThreshold = rtcBaseline * THRESHOLD_MULTIPLIER;
+  float currentThreshold = rtcBaseline + (rtcBaseline * DELTA_RATIO); // Absolute value check
   while (recording) {
     // Read audio chunk and write to SD
     uint8_t buffer[I2S_READ_BUF_SIZE];
@@ -603,8 +603,8 @@ void goToSleep() {
     Serial.println("  [EMA Skip] Sensor active or noisy; skipping baseline update.");
   }
 
-  float currentThreshold = rtcBaseline * THRESHOLD_MULTIPLIER;
-  Serial.printf("   Touch GPIO1 to wake up (Wake threshold: %.0f).\n", currentThreshold);
+  float wakeupDelta = rtcBaseline * DELTA_RATIO;
+  Serial.printf("   Touch GPIO1 to wake up (Wake baseline: %.0f, expected delta: %.0f).\n", rtcBaseline, wakeupDelta);
   Serial.println();
 
   // Flush serial before sleeping (safe check for USB CDC)
@@ -628,8 +628,8 @@ void goToSleep() {
   // Close SD card if mounted
   SD.end();
 
-  // Configure touch wakeup with dynamic threshold
-  touchSleepWakeUpEnable(TOUCH_BUTTON_MEMORY, (uint32_t)currentThreshold);
+  // Configure touch wakeup with dynamic delta threshold
+  touchSleepWakeUpEnable(TOUCH_BUTTON_MEMORY, (uint32_t)wakeupDelta);
 
   // Enter deep sleep (device reboots on wake)
   esp_deep_sleep_start();

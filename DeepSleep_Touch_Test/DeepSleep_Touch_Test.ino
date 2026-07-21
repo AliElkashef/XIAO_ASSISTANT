@@ -6,7 +6,8 @@
  *  Board  : Seeed Studio XIAO ESP32S3 Sense
  *  IDE    : Arduino IDE 2.x+
  *  Purpose: Prove that event-driven deep sleep with touch wakeup works
- *           reliably on this specific board before refactoring the main project.
+ *           reliably on this specific board before refactoring the main
+ * project.
  *
  *  Behavior
  *  --------
@@ -53,46 +54,47 @@
 // Touch pin to use as wakeup source
 // On XIAO ESP32S3: D0=GPIO1, D1=GPIO2, D2=GPIO3, D3=GPIO4, D4=GPIO5, D5=GPIO6
 // All of GPIO 1-9 support capacitive touch on ESP32-S3.
-#define WAKEUP_TOUCH_PIN       1      // GPIO 1 (D0) — same as main project
+#define WAKEUP_TOUCH_PIN 1 // GPIO 1 (D0) — same as main project
 
 // ─── Dynamic Calibration Configuration ───────────────────────────────────────
 
-// On ESP32-S3, touchSleepWakeUpEnable expects a DELTA value (change in capacitance).
-// It triggers wakeup when: (Touched_Value - Baseline_Value) > Delta_Threshold
-// We calculate this delta dynamically as: Delta_Threshold = Baseline * DELTA_RATIO.
+// On ESP32-S3, touchSleepWakeUpEnable expects a DELTA value (change in
+// capacitance). It triggers wakeup when: (Touched_Value - Baseline_Value) >
+// Delta_Threshold We calculate this delta dynamically as: Delta_Threshold =
+// Baseline * DELTA_RATIO.
 //
-// If the board doesn't wake up: DECREASE DELTA_RATIO (e.g. to 0.4 or 0.3) for more sensitivity.
-// If the board wakes up by itself: INCREASE DELTA_RATIO (e.g. to 0.7 or 0.8) for less sensitivity.
-#define DELTA_RATIO            0.1    // Wakeup threshold delta = 50% of baseline (more sensitive & reliable)
-#define NOISE_MARGIN_RATIO     1.3    // Threshold below which we consider the sensor untouched
-#define EMA_ALPHA              0.15   // Adaptation rate (higher since sleep boots are infrequent)
-#define CALIBRATION_SAMPLES    50     // Samples for initial boot calibration
-#define CALIBRATION_DELAY_MS   10     // Delay between calibration samples
+// If the board doesn't wake up: DECREASE DELTA_RATIO (e.g. to 0.4 or 0.3) for
+// more sensitivity. If the board wakes up by itself: INCREASE DELTA_RATIO (e.g.
+// to 0.7 or 0.8) for less sensitivity.
+#define DELTA_RATIO  0.1 // Wakeup threshold delta = 50% of baseline (more sensitive & reliable)
+#define NOISE_MARGIN_RATIO 1.05 // Threshold below which we consider the sensor untouched
+#define EMA_ALPHA 0.15 // Adaptation rate (higher since sleep boots are infrequent)
+#define CALIBRATION_SAMPLES 50  // Samples for initial boot calibration
+#define CALIBRATION_DELAY_MS 10 // Delay between calibration samples
 
 // Built-in LED on XIAO ESP32S3
 // GPIO 21 — ACTIVE LOW (LOW = ON, HIGH = OFF)
 // Note: GPIO 21 is also the SD card CS on the Sense expansion board,
 // but for this test we're not using the SD card.
-#define LED_PIN                21
-#define LED_ON                 LOW   // Active-low LED
-#define LED_OFF                HIGH
+#define LED_PIN 21
+#define LED_ON LOW // Active-low LED
+#define LED_OFF HIGH
 
 // How many additional touch pins to read for calibration display
 // These are read-only for diagnostics, not configured as wakeup sources
-#define NUM_TOUCH_PINS         6
+#define NUM_TOUCH_PINS 6
 
 // Additional touch pins to read (for diagnostics only)
 const int touchPins[NUM_TOUCH_PINS] = {1, 2, 3, 4, 5, 6};
-const char* touchLabels[NUM_TOUCH_PINS] = {
-  "GPIO1 (D0)", "GPIO2 (D1)", "GPIO3 (D2)",
-  "GPIO4 (D3)", "GPIO5 (D4)", "GPIO6 (D5)"
-};
+const char *touchLabels[NUM_TOUCH_PINS] = {"GPIO1 (D0)", "GPIO2 (D1)",
+                                           "GPIO3 (D2)", "GPIO4 (D3)",
+                                           "GPIO5 (D4)", "GPIO6 (D5)"};
 
 // =============================================================================
 //  PERSISTENT COUNTERS & STATE — Survive deep sleep (RTC memory)
 // =============================================================================
 
-RTC_DATA_ATTR int   bootCount = 0;
+RTC_DATA_ATTR int bootCount = 0;
 RTC_DATA_ATTR float rtcBaseline = 0.0; // Dynamic baseline stored in RTC memory
 
 // =============================================================================
@@ -102,17 +104,26 @@ RTC_DATA_ATTR float rtcBaseline = 0.0; // Dynamic baseline stored in RTC memory
 /**
  * Returns a human-readable string for the wakeup cause.
  */
-const char* getWakeupReasonString(esp_sleep_wakeup_cause_t cause) {
+const char *getWakeupReasonString(esp_sleep_wakeup_cause_t cause) {
   switch (cause) {
-    case ESP_SLEEP_WAKEUP_UNDEFINED:    return "Not from deep sleep (power-on / reset)";
-    case ESP_SLEEP_WAKEUP_EXT0:         return "External signal (RTC_IO) — ext0";
-    case ESP_SLEEP_WAKEUP_EXT1:         return "External signal (RTC_CNTL) — ext1";
-    case ESP_SLEEP_WAKEUP_TIMER:        return "Timer";
-    case ESP_SLEEP_WAKEUP_TOUCHPAD:     return "★ Touchpad ★";
-    case ESP_SLEEP_WAKEUP_ULP:          return "ULP program";
-    case ESP_SLEEP_WAKEUP_GPIO:         return "GPIO (light sleep only)";
-    case ESP_SLEEP_WAKEUP_UART:         return "UART (light sleep only)";
-    default:                            return "Unknown";
+  case ESP_SLEEP_WAKEUP_UNDEFINED:
+    return "Not from deep sleep (power-on / reset)";
+  case ESP_SLEEP_WAKEUP_EXT0:
+    return "External signal (RTC_IO) — ext0";
+  case ESP_SLEEP_WAKEUP_EXT1:
+    return "External signal (RTC_CNTL) — ext1";
+  case ESP_SLEEP_WAKEUP_TIMER:
+    return "Timer";
+  case ESP_SLEEP_WAKEUP_TOUCHPAD:
+    return "★ Touchpad ★";
+  case ESP_SLEEP_WAKEUP_ULP:
+    return "ULP program";
+  case ESP_SLEEP_WAKEUP_GPIO:
+    return "GPIO (light sleep only)";
+  case ESP_SLEEP_WAKEUP_UART:
+    return "UART (light sleep only)";
+  default:
+    return "Unknown";
   }
 }
 
@@ -134,7 +145,7 @@ void waitForSerial(unsigned long maxWaitMs) {
  */
 void blinkLED(int times, int onMs, int offMs) {
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LED_OFF);  // Start with LED off
+  digitalWrite(LED_PIN, LED_OFF); // Start with LED off
 
   for (int i = 0; i < times; i++) {
     digitalWrite(LED_PIN, LED_ON);
@@ -156,17 +167,23 @@ void printTouchCalibration(float currentDelta) {
 
   for (int i = 0; i < NUM_TOUCH_PINS; i++) {
     uint32_t val = touchRead(touchPins[i]);
-    float pinBaseline = (touchPins[i] == WAKEUP_TOUCH_PIN) ? rtcBaseline : (float)val; // Fallback for other pins
-    float pinDelta = (touchPins[i] == WAKEUP_TOUCH_PIN) ? currentDelta : (pinBaseline * DELTA_RATIO);
+    float pinBaseline = (touchPins[i] == WAKEUP_TOUCH_PIN)
+                            ? rtcBaseline
+                            : (float)val; // Fallback for other pins
+    float pinDelta = (touchPins[i] == WAKEUP_TOUCH_PIN)
+                         ? currentDelta
+                         : (pinBaseline * DELTA_RATIO);
     bool touched = (val > (pinBaseline + pinDelta));
-    const char* status = touched ? "TOUCHED!" : "idle";
+    const char *status = touched ? "TOUCHED!" : "idle";
     Serial.printf("  │ %-12s │ %10lu │ %-12s │\n", touchLabels[i], val, status);
   }
 
   Serial.println("  └──────────────┴────────────┴──────────────┘");
   Serial.printf("  RTC Baseline     : %.2f\n", rtcBaseline);
-  Serial.printf("  Wake threshold   : %.2f (Baseline + Delta)\n", rtcBaseline + currentDelta);
-  Serial.printf("  Wakeup Delta (D) : %.2f (Expected trigger change)\n", currentDelta);
+  Serial.printf("  Wake threshold   : %.2f (Baseline + Delta)\n",
+                rtcBaseline + currentDelta);
+  Serial.printf("  Wakeup Delta (D) : %.2f (Expected trigger change)\n",
+                currentDelta);
 }
 
 // =============================================================================
@@ -198,14 +215,15 @@ void setup() {
   if (rtcBaseline < 10.0) {
     Serial.println("  [Calibrating] First boot baseline calibration...");
     Serial.println("  Keep hands off the touch sensor!");
-    
+
     uint64_t sum = 0;
     for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
       sum += touchRead(WAKEUP_TOUCH_PIN);
       delay(CALIBRATION_DELAY_MS);
     }
     rtcBaseline = (float)sum / CALIBRATION_SAMPLES;
-    Serial.printf("  [Calibrated] Initial baseline set to: %.2f\n", rtcBaseline);
+    Serial.printf("  [Calibrated] Initial baseline set to: %.2f\n",
+                  rtcBaseline);
   }
 
   // Calculate current delta
@@ -219,11 +237,12 @@ void setup() {
     Serial.println("  >>> Waiting for touch release...");
     unsigned long releaseStart = millis();
     float releaseThreshold = rtcBaseline * NOISE_MARGIN_RATIO;
-    while (touchRead(WAKEUP_TOUCH_PIN) > releaseThreshold && (millis() - releaseStart < 4000)) {
+    while (touchRead(WAKEUP_TOUCH_PIN) > releaseThreshold &&
+           (millis() - releaseStart < 4000)) {
       delay(50); // Timeout after 4s
     }
     delay(200); // Settle time
-    
+
     // Blink LED 3 times to confirm wakeup
     blinkLED(3, 300, 300);
     delay(5000);
@@ -240,12 +259,15 @@ void setup() {
     // Only update baseline if the values are in the untouched region
     if (idleAverage < rtcBaseline * NOISE_MARGIN_RATIO) {
       float oldBaseline = rtcBaseline;
-      rtcBaseline = (rtcBaseline * (1.0 - EMA_ALPHA)) + (idleAverage * EMA_ALPHA);
+      rtcBaseline =
+          (rtcBaseline * (1.0 - EMA_ALPHA)) + (idleAverage * EMA_ALPHA);
       currentDelta = rtcBaseline * DELTA_RATIO;
-      Serial.printf("  [EMA Update] Baseline drifted: %.2f -> %.2f | New Delta: %.2f\n",
-                    oldBaseline, rtcBaseline, currentDelta);
+      Serial.printf(
+          "  [EMA Update] Baseline drifted: %.2f -> %.2f | New Delta: %.2f\n",
+          oldBaseline, rtcBaseline, currentDelta);
     } else {
-      Serial.println("  [EMA Skip] Sensor still active; skipping baseline update.");
+      Serial.println(
+          "  [EMA Skip] Sensor still active; skipping baseline update.");
     }
 
     // Wait remaining time of the 2-second pause

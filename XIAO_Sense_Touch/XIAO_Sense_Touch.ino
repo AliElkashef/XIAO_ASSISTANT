@@ -119,8 +119,8 @@ const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 // ─── Touch & Mode Detection Parameters ──────────────────────────────────────
 
 // On ESP32-S3, touchRead() values INCREASE when touched.
-#define DELTA_RATIO           0.5    // Touch wakeup delta = 50% of baseline (more sensitive & reliable)
-#define NOISE_MARGIN_RATIO     1.3    // Threshold below which we consider the sensor untouched
+#define DELTA_RATIO           0.1    // Touch wakeup delta = 10% of baseline (more sensitive & reliable)
+#define NOISE_MARGIN_RATIO     1.05   // Threshold below which we consider the sensor untouched
 #define EMA_ALPHA              0.15   // Adaptation rate (higher since sleep boots are infrequent)
 #define CALIBRATION_SAMPLES    50     // Samples for initial boot calibration
 #define CALIBRATION_DELAY_MS   10     // Delay between calibration samples

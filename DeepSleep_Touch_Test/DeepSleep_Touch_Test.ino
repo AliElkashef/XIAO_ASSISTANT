@@ -67,7 +67,7 @@
 // more sensitivity. If the board wakes up by itself: INCREASE DELTA_RATIO (e.g.
 // to 0.7 or 0.8) for less sensitivity.
 #define DELTA_RATIO  0.1 // Wakeup threshold delta = 50% of baseline (more sensitive & reliable)
-#define NOISE_MARGIN_RATIO 1.05 // Threshold below which we consider the sensor untouched
+#define NOISE_MARGIN_RATIO 1.3 // Threshold below which we consider the sensor untouched
 #define EMA_ALPHA 0.15 // Adaptation rate (higher since sleep boots are infrequent)
 #define CALIBRATION_SAMPLES 50  // Samples for initial boot calibration
 #define CALIBRATION_DELAY_MS 10 // Delay between calibration samples

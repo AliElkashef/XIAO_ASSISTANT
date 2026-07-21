@@ -120,7 +120,7 @@ const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 
 // On ESP32-S3, touchRead() values INCREASE when touched.
 #define DELTA_RATIO           0.1    // Touch wakeup delta = 10% of baseline (more sensitive & reliable)
-#define NOISE_MARGIN_RATIO     1.05   // Threshold below which we consider the sensor untouched
+#define NOISE_MARGIN_RATIO     1.1   // Threshold below which we consider the sensor untouched
 #define EMA_ALPHA              0.15   // Adaptation rate (higher since sleep boots are infrequent)
 #define CALIBRATION_SAMPLES    50     // Samples for initial boot calibration
 #define CALIBRATION_DELAY_MS   10     // Delay between calibration samples
@@ -164,6 +164,17 @@ static unsigned long lastActivityMs = 0;
 // Web server instance (used only in Mode 2)
 WebServer server(80);
 
+// ─── Logging Utility ─────────────────────────────────────────────────────────
+
+void logEvent(const char* format, ...) {
+  char buf[128];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(buf, sizeof(buf), format, args);
+  va_end(args);
+  Serial.printf("[%04lu ms] %s\n", millis(), buf);
+}
+
 // ─── Forward Declarations ────────────────────────────────────────────────────
 
 // Core architecture
@@ -174,7 +185,7 @@ void      checkWebTimeout();
 void      goToSleep();
 void      waitForSerial(unsigned long maxWaitMs);
 
-// Peripheral init (EXISTING — unchanged)
+// Peripheral init
 bool   initSDCard();
 bool   initCamera();
 bool   initMicrophone();
@@ -182,21 +193,21 @@ void   initVibrationMotor();
 void   initWiFiAP();
 void   setupWebServer();
 
-// Peripheral deinit (NEW)
+// Peripheral deinit
 void   deinitCamera();
 void   deinitMicrophone();
 
-// Memory capture helpers (EXISTING — unchanged)
+// Memory capture helpers
 bool   savePhoto(const char* path);
 void   recordAudioChunk();
 void   writeWavHeader(File &file, uint32_t dataSize);
 int    findNextMemoryIndex();
 
-// Vibration (EXISTING — unchanged)
+// Vibration
 void   vibrateOnce(unsigned long durationMs);
 void   vibratePattern(int pulses, unsigned long onMs, unsigned long offMs);
 
-// Web server handlers (EXISTING — unchanged)
+// Web server handlers
 void   handleRoot();
 void   handleListMemories();
 void   handleFile();
@@ -210,25 +221,27 @@ void setup() {
   Serial.begin(115200);
   waitForSerial(4000);
 
-  Serial.println();
-  Serial.println("==========================================");
-  Serial.println("  XIAO ESP32S3 Sense — Memory Recorder");
-  Serial.println("       (Event-Driven Deep Sleep)");
-  Serial.println("==========================================");
-  delay(5000);
+  // 1. Boot Start & Stabilization Delay
+  logEvent("Boot");
+  
+  // Stabilization delay after waking up from deep sleep.
+  // Gives the internal PLL and oscillators time to settle, ensuring
+  // clean clock lines to peripherals like the SD card and PDM microphone.
+  delay(100);
+
   // Always init vibration motor first (needed for all modes)
   initVibrationMotor();
 
   // Establish Baseline on First Boot
   if (rtcBaseline < 10.0) {
-    Serial.println("  [Calibrating] First boot baseline calibration...");
+    logEvent("[Calibrating] First boot baseline calibration...");
     uint64_t sum = 0;
     for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
       sum += touchRead(TOUCH_BUTTON_MEMORY);
       delay(CALIBRATION_DELAY_MS);
     }
     rtcBaseline = (float)sum / CALIBRATION_SAMPLES;
-    Serial.printf("  [Calibrated] Initial baseline: %.2f\n", rtcBaseline);
+    logEvent("Calibrated baseline: %.2f", rtcBaseline);
   }
 
   // Detect what kind of touch woke us up
@@ -238,9 +251,7 @@ void setup() {
 
     case TOUCH_SHORT:
       // ── Mode 1: Capture Memory ──
-      Serial.println();
-      Serial.println(">>> MODE 1: Capture Memory (short touch)");
-      Serial.println();
+      logEvent("Memory Capture Started");
       vibrateOnce(100);      // Confirm wakeup
       captureMemory();       // Full pipeline: init → capture → deinit
       goToSleep();           // Sleep immediately after
@@ -248,20 +259,14 @@ void setup() {
 
     case TOUCH_LONG:
       // ── Mode 2: Web Server ──
-      Serial.println();
-      Serial.println(">>> MODE 2: Web Server (long touch)");
-      Serial.println();
+      logEvent("Web Server Mode Triggered");
       vibratePattern(3, 80, 80);  // Triple buzz = web mode
       startWebServerMode();       // Init SD + WiFi + server
-      // Falls through to loop() which handles web requests
       break;
 
     default:
       // Cold boot, reset, or unknown wakeup
-      Serial.println();
-      Serial.println("Cold boot — no touch detected.");
-      Serial.println("Going to sleep. Touch GPIO1 to wake.");
-      Serial.println();
+      logEvent("Cold boot — no touch detected. Going to sleep.");
       vibrateOnce(50);
       goToSleep();
       break;
@@ -296,13 +301,12 @@ void loop() {
 TouchType detectTouchType() {
   esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
 
-  Serial.printf("  Wakeup cause: %d", cause);
   if (cause == ESP_SLEEP_WAKEUP_TOUCHPAD) {
-    Serial.println(" (Touch)");
-  } else if (cause == 0) {
-    Serial.println(" (Power-on / Reset)");
+    logEvent("Wakeup reason: TOUCH");
+  } else if (cause == ESP_SLEEP_WAKEUP_UNDEFINED) {
+    logEvent("Wakeup reason: POWERON / RESET");
   } else {
-    Serial.printf(" (Other: %d)\n", cause);
+    logEvent("Wakeup reason: OTHER (%d)", cause);
   }
 
   // Only proceed if woken by touch
@@ -320,7 +324,7 @@ TouchType detectTouchType() {
   while (touchRead(TOUCH_BUTTON_MEMORY) > currentThreshold) {
     // Still holding...
     if ((millis() - holdStart) >= LONG_TOUCH_MS) {
-      Serial.println("  → LONG TOUCH detected (held > 2 sec)");
+      logEvent("LONG TOUCH detected (held > 2 sec)");
       // Wait for release before continuing
       while (touchRead(TOUCH_BUTTON_MEMORY) > currentThreshold) {
         delay(50);
@@ -333,7 +337,7 @@ TouchType detectTouchType() {
 
   // Released before timeout → short touch
   delay(DEBOUNCE_MS);
-  Serial.println("  → SHORT TOUCH detected (quick tap)");
+  logEvent("SHORT TOUCH detected (quick tap)");
   return TOUCH_SHORT;
 }
 
@@ -514,14 +518,15 @@ void startWebServerMode() {
   // Init SD card (needed for file serving)
   sdReady = initSDCard();
   if (!sdReady) {
-    Serial.println("[Error] SD card not available — cannot serve files.");
-    Serial.println("Going to sleep.");
+    logEvent("[Error] SD card not available — cannot serve files. Sleeping.");
     goToSleep();
     return;
   }
 
   // Start WiFi Access Point
+  logEvent("WiFi Init...");
   initWiFiAP();
+  logEvent("WiFi OK");
 
   // Start web server
   setupWebServer();
@@ -530,14 +535,7 @@ void startWebServerMode() {
   lastActivityMs = millis();
   webServerMode = true;
 
-  Serial.println();
-  Serial.println("--- Web Server Active ---");
-  Serial.printf("  SSID     : %s\n", AP_SSID);
-  Serial.println("  Password : 12345678");
-  Serial.println("  URL      : http://192.168.4.1");
-  Serial.printf("  Timeout  : %d sec inactivity\n", WEB_TIMEOUT_SEC);
-  Serial.println("-------------------------");
-  Serial.println();
+  logEvent("System Ready (WiFi AP running)");
 }
 
 // =============================================================================
@@ -575,10 +573,9 @@ void checkWebTimeout() {
  * On wake, the device reboots and runs setup() again.
  */
 void goToSleep() {
-  Serial.println();
-  Serial.println("💤 Entering deep sleep...");
+  logEvent("Shutting down subsystems before Deep Sleep...");
 
-  // Wait for touch release before sleeping to update baseline and prevent immediate wakeup
+  // 1. Wait for touch release before sleeping to update baseline and prevent immediate wakeup
   float releaseThreshold = rtcBaseline * NOISE_MARGIN_RATIO;
   unsigned long releaseStart = millis();
   while (touchRead(TOUCH_BUTTON_MEMORY) > releaseThreshold && (millis() - releaseStart < 4000)) {
@@ -586,7 +583,7 @@ void goToSleep() {
   }
   delay(200); // Settle time
 
-  // Dynamic Baseline Tracking: Take 10 idle samples to update our baseline
+  // 2. Dynamic Baseline Tracking: Take 10 idle samples to update our baseline
   uint64_t sum = 0;
   for (int i = 0; i < 10; i++) {
     sum += touchRead(TOUCH_BUTTON_MEMORY);
@@ -598,16 +595,37 @@ void goToSleep() {
   if (idleAverage < rtcBaseline * NOISE_MARGIN_RATIO) {
     float oldBaseline = rtcBaseline;
     rtcBaseline = (rtcBaseline * (1.0 - EMA_ALPHA)) + (idleAverage * EMA_ALPHA);
-    Serial.printf("  [EMA Update] Baseline drifted: %.2f -> %.2f\n", oldBaseline, rtcBaseline);
+    logEvent("Baseline drifted: %.2f -> %.2f", oldBaseline, rtcBaseline);
   } else {
-    Serial.println("  [EMA Skip] Sensor active or noisy; skipping baseline update.");
+    logEvent("[EMA Skip] Sensor active or noisy; skipping baseline update.");
   }
 
   float wakeupDelta = rtcBaseline * DELTA_RATIO;
-  Serial.printf("   Touch GPIO1 to wake up (Wake baseline: %.0f, expected delta: %.0f).\n", rtcBaseline, wakeupDelta);
-  Serial.println();
 
-  // Flush serial before sleeping (safe check for USB CDC)
+  // 3. Stop web server if running
+  if (webServerMode) {
+    server.stop();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    webServerMode = false;
+    logEvent("WiFi shut down");
+  }
+
+  // 4. Force release camera and mic drivers if they are still loaded
+  deinitCamera();
+  deinitMicrophone();
+
+  // 5. Cleanly close SD filesystem
+  SD.end();
+  logEvent("SD card unmounted");
+
+  // 6. Safeguard vibration motor (detach pin to prevent leakage/buzzing)
+  ledcWrite(VIBRATION_PWM_CHANNEL, 0);
+  ledcDetachPin(VIBRATION_MOTOR_PIN);
+  pinMode(VIBRATION_MOTOR_PIN, INPUT); // High-impedance state to prevent leakage
+  logEvent("Motor pin safe");
+
+  // Flush serial before sleeping
   if (Serial) {
     Serial.flush();
   }
@@ -617,16 +635,7 @@ void goToSleep() {
   vibratePattern(3, 50, 50);
   delay(200);
 
-  // Stop web server if running
-  if (webServerMode) {
-    server.stop();
-    WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_OFF);
-    webServerMode = false;
-  }
-
-  // Close SD card if mounted
-  SD.end();
+  logEvent("Entering deep sleep. Wake delta threshold: %.0f", wakeupDelta);
 
   // Configure touch wakeup with dynamic delta threshold
   touchSleepWakeUpEnable(TOUCH_BUTTON_MEMORY, (uint32_t)wakeupDelta);
@@ -635,7 +644,7 @@ void goToSleep() {
   esp_deep_sleep_start();
 
   // Should never reach here
-  Serial.println("[ERROR] Deep sleep failed!");
+  logEvent("[ERROR] Deep sleep failed!");
 }
 
 // =============================================================================
@@ -647,7 +656,7 @@ void goToSleep() {
  */
 void deinitCamera() {
   esp_camera_deinit();
-  Serial.println("Camera deinitialized.");
+  logEvent("Camera deinitialized.");
 }
 
 /**
@@ -655,46 +664,47 @@ void deinitCamera() {
  */
 void deinitMicrophone() {
   i2s_driver_uninstall(MIC_I2S_PORT);
-  Serial.println("Microphone deinitialized.");
+  logEvent("Microphone deinitialized.");
 }
 
 // =============================================================================
-//  SD CARD INITIALISATION (existing — unchanged)
+//  SD CARD INITIALISATION
 // =============================================================================
 
 bool initSDCard() {
-  Serial.println("Initializing SD card...");
+  logEvent("SD Init...");
+
+  // Give the SPI bus pull-up resistors and lines time to settle
+  // before starting communication with the SD card.
+  delay(20);
 
   if (!SD.begin(SD_CS_PIN)) {
-    Serial.println("[Error] SD card mount failed!");
+    logEvent("[Error] SD card mount failed! Free Heap: %d B, Free PSRAM: %d B", 
+             ESP.getFreeHeap(), ESP.getFreePsram());
     return false;
   }
 
   uint8_t cardType = SD.cardType();
   if (cardType == CARD_NONE) {
-    Serial.println("[Error] No SD card detected.");
+    logEvent("[Error] No SD card detected. Free Heap: %d B, Free PSRAM: %d B", 
+             ESP.getFreeHeap(), ESP.getFreePsram());
     return false;
   }
 
-  Serial.printf("SD card OK — type: ");
-  switch (cardType) {
-    case CARD_MMC:  Serial.println("MMC");   break;
-    case CARD_SD:   Serial.println("SD");    break;
-    case CARD_SDHC: Serial.println("SDHC");  break;
-    default:        Serial.println("Unknown"); break;
-  }
-
-  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-  Serial.printf("SD card size: %llu MB\n", cardSize);
+  logEvent("SD OK");
   return true;
 }
 
 // =============================================================================
-//  CAMERA INITIALISATION (existing — unchanged)
+//  CAMERA INITIALISATION
 // =============================================================================
 
 bool initCamera() {
-  Serial.println("Initializing camera...");
+  logEvent("Camera Init...");
+
+  // Small power-up stabilization delay. The OV2640 sensor on the Sense board
+  // has LDO regulators that need a brief moment to stabilize after power is applied.
+  delay(50);
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -725,20 +735,21 @@ bool initCamera() {
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("[Error] Camera init failed: 0x%x\n", err);
+    logEvent("[Error] Camera init failed: 0x%x. Free Heap: %d B, Free PSRAM: %d B", 
+             err, ESP.getFreeHeap(), ESP.getFreePsram());
     return false;
   }
 
-  Serial.println("Camera ready.");
+  logEvent("Camera OK");
   return true;
 }
 
 // =============================================================================
-//  MICROPHONE INITIALISATION (existing — unchanged)
+//  MICROPHONE INITIALISATION
 // =============================================================================
 
 bool initMicrophone() {
-  Serial.println("Initializing microphone...");
+  logEvent("Microphone Init...");
 
   i2s_config_t i2s_config = {
     .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
@@ -763,18 +774,19 @@ bool initMicrophone() {
 
   esp_err_t err = i2s_driver_install(MIC_I2S_PORT, &i2s_config, 0, NULL);
   if (err != ESP_OK) {
-    Serial.printf("[Error] I2S driver install failed: 0x%x\n", err);
+    logEvent("[Error] I2S driver install failed: 0x%x. Free Heap: %d B, Free PSRAM: %d B", 
+             err, ESP.getFreeHeap(), ESP.getFreePsram());
     return false;
   }
 
   err = i2s_set_pin(MIC_I2S_PORT, &pin_config);
   if (err != ESP_OK) {
-    Serial.printf("[Error] I2S set pin failed: 0x%x\n", err);
+    logEvent("[Error] I2S set pin failed: 0x%x", err);
     i2s_driver_uninstall(MIC_I2S_PORT);
     return false;
   }
 
-  Serial.println("Microphone ready.");
+  logEvent("Microphone OK");
   return true;
 }
 

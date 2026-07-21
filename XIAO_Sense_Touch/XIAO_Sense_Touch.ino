@@ -120,7 +120,7 @@ const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 
 // On ESP32-S3, touchRead() values INCREASE when touched.
 #define DELTA_RATIO           0.1    // Touch wakeup delta = 10% of baseline (more sensitive & reliable)
-#define NOISE_MARGIN_RATIO     1.1   // Threshold below which we consider the sensor untouched
+#define NOISE_MARGIN_RATIO     1.05   // Threshold below which we consider the sensor untouched
 #define EMA_ALPHA              0.15   // Adaptation rate (higher since sleep boots are infrequent)
 #define CALIBRATION_SAMPLES    50     // Samples for initial boot calibration
 #define CALIBRATION_DELAY_MS   10     // Delay between calibration samples
@@ -128,13 +128,13 @@ const char* AP_PASSWORD = "12345678";       // WiFi password (min 8 chars)
 
 // Touch hold duration to distinguish short vs long touch.
 // After wakeup, if the user holds for longer than this → Mode 2 (Web Server)
-#define LONG_TOUCH_MS          3000   // 2 seconds = long touch
+#define LONG_TOUCH_MS          3000   // 3 seconds = long touch
 
 // ─── Web Server Timeout ──────────────────────────────────────────────────────
 
 // In Mode 2, how many seconds of no web activity (and no WiFi clients)
 // before the device returns to deep sleep.
-#define WEB_TIMEOUT_SEC       200       // 2 minutes
+#define WEB_TIMEOUT_SEC       300       // 5 minutes (300 seconds) inactivity timeout
 
 // ─── Vibration Motor Parameters ──────────────────────────────────────────────
 
@@ -182,6 +182,7 @@ TouchType detectTouchType();
 void      captureMemory();
 void      startWebServerMode();
 void      checkWebTimeout();
+void      checkTouchExit();
 void      goToSleep();
 void      waitForSerial(unsigned long maxWaitMs);
 
@@ -281,9 +282,8 @@ void loop() {
   if (webServerMode) {
     server.handleClient();
     checkWebTimeout();
+    checkTouchExit();
   }
-  // In all other cases, the device should have entered deep sleep
-  // from setup() and never reach here.
 }
 
 // =============================================================================
@@ -515,6 +515,7 @@ void captureMemory() {
  * The device stays awake until the inactivity timeout triggers.
  */
 void startWebServerMode() {
+  logEvent("Entering Web Server Mode");
   // Init SD card (needed for file serving)
   sdReady = initSDCard();
   if (!sdReady) {
@@ -556,10 +557,46 @@ void checkWebTimeout() {
   // Check if timeout has been reached
   unsigned long elapsed = millis() - lastActivityMs;
   if (elapsed >= (unsigned long)WEB_TIMEOUT_SEC * 1000UL) {
-    Serial.println();
-    Serial.println("[Timeout] No web activity — shutting down.");
+    logEvent("Timeout exit detected (no web activity for %d sec)", WEB_TIMEOUT_SEC);
     webServerMode = false;
     goToSleep();
+  }
+}
+
+// =============================================================================
+//  TOUCH EXIT DETECTION (runs in loop during Mode 2)
+// =============================================================================
+
+/**
+ * Checks for a long touch during Web Server Mode to trigger an exit.
+ * Completely non-blocking.
+ */
+void checkTouchExit() {
+  static unsigned long touchStartMs = 0;
+  static bool touchActive = false;
+
+  float currentThreshold = rtcBaseline + (rtcBaseline * DELTA_RATIO);
+  bool isTouched = (touchRead(TOUCH_BUTTON_MEMORY) > currentThreshold);
+
+  if (isTouched) {
+    if (!touchActive) {
+      touchActive = true;
+      touchStartMs = millis();
+    } else {
+      unsigned long elapsed = millis() - touchStartMs;
+      if (elapsed >= LONG_TOUCH_MS) {
+        logEvent("Long touch exit detected");
+        touchActive = false; // Reset state
+        
+        // Haptic feedback to confirm exit (double buzz)
+        vibratePattern(2, 100, 100);
+        
+        webServerMode = false;
+        goToSleep();
+      }
+    }
+  } else {
+    touchActive = false;
   }
 }
 
